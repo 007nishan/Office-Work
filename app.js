@@ -224,10 +224,11 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     addNodeBtn.addEventListener('click', () => {
-        const containerRect = canvasContainer.getBoundingClientRect();
-        const startX = canvasContainer.scrollLeft + (containerRect.width/2) - 130; 
-        const startY = canvasContainer.scrollTop + (containerRect.height/2) - 50; 
-        createNode(startX, startY, "New Editable Step");
+        const wrapper = document.getElementById('exportWrapper');
+        const startX = wrapper.scrollLeft + (wrapper.clientWidth / 2) - 130; 
+        const startY = wrapper.scrollTop + (wrapper.clientHeight / 2) - 50; 
+        const htmlText = "<div class='node-content'><span class='step-label'>New Step</span><strong class='primary-action'>Custom Action</strong><span class='instruction-text'>Describe instruction here.</span></div>";
+        createNode(startX, startY, htmlText);
     });
 
     // Pointer logic
@@ -241,11 +242,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const id = e.currentTarget.id;
         
-        if (e.shiftKey) {
+        // Check if user clicked on a port
+        if (e.target.classList.contains('port')) {
             isConnecting = true; connectionStartNodeId = id;
             tempLine = document.createElementNS("http://www.w3.org/2000/svg", "path");
             tempLine.setAttribute("class", "connection");
             tempLine.setAttribute("marker-end", "url(#arrow)");
+            tempLine.style.pointerEvents = 'none'; // prevent blocking elementFromPoint
+            linesCanvas.appendChild(tempLine);
+            e.preventDefault();
+        } else if (e.shiftKey) {
+            // Keep shift key fallback just in case
+            isConnecting = true; connectionStartNodeId = id;
+            tempLine = document.createElementNS("http://www.w3.org/2000/svg", "path");
+            tempLine.setAttribute("class", "connection");
+            tempLine.setAttribute("marker-end", "url(#arrow)");
+            tempLine.style.pointerEvents = 'none';
             linesCanvas.appendChild(tempLine);
             e.preventDefault();
         } else {
