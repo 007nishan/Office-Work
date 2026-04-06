@@ -80,7 +80,7 @@ button { cursor: pointer; font-weight: 500; font-size: 0.95rem; padding: 10px 20
 path.connection { fill: none; stroke: #94a3b8; stroke-width: 3; pointer-events: stroke; cursor: pointer; transition: stroke 0.2s; }
 path.connection:hover { stroke: #ef4444; }
 
-#nodesContainer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+#nodesContainer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
 
 /* The node has resize:both to satisfy size adjustments */
 .node {
@@ -97,6 +97,7 @@ path.connection:hover { stroke: #ef4444; }
     flex-direction: column;
     transition: border-color 0.2s, box-shadow 0.2s;
     user-select: none;
+    pointer-events: auto;
     /* KEY FOR RESIZE */
     resize: both;
     overflow: hidden; 
