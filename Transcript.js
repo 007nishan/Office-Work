@@ -360,57 +360,14 @@
             'user-select: none;'
         );
 
-        var savedLeft = localStorage.getItem('ps_heartbeat_left_v25');
-        var savedTop = localStorage.getItem('ps_heartbeat_top_v25');
-        if (savedLeft && savedTop) {
-            btn.style.left = savedLeft;
-            btn.style.top = savedTop;
-        } else {
-            btn.style.right = '2%';
-            btn.style.top = '3%';
-        }
+        btn.style.right = '2%';
+        btn.style.top = '3%';
 
         btn.addEventListener('mouseenter', function () { btn.style.backgroundColor = '#004F6D'; });
         btn.addEventListener('mouseleave', function () { btn.style.backgroundColor = '#00688D'; });
 
         btn.addEventListener('click', function (e) {
-            if (e._psDragIgnore) return;
             triggerAction();
-        });
-
-        var isDragging = false;
-        var hasMoved = false;
-        var offsetX = 0;
-        var offsetY = 0;
-
-        btn.addEventListener('mousedown', function (e) {
-            isDragging = true;
-            hasMoved = false;
-            offsetX = e.clientX - btn.getBoundingClientRect().left;
-            offsetY = e.clientY - btn.getBoundingClientRect().top;
-            e.preventDefault();
-        });
-
-        document.addEventListener('mousemove', function (e) {
-            if (!isDragging) return;
-            hasMoved = true;
-            btn.style.left = (e.clientX - offsetX) + 'px';
-            btn.style.top = (e.clientY - offsetY) + 'px';
-            btn.style.right = 'auto';
-        });
-
-        document.addEventListener('mouseup', function () {
-            if (!isDragging) return;
-            isDragging = false;
-            if (hasMoved) {
-                localStorage.setItem('ps_heartbeat_left_v25', btn.style.left);
-                localStorage.setItem('ps_heartbeat_top_v25', btn.style.top);
-                console.log('PS_HEARTBEAT: Position saved');
-                btn.addEventListener('click', function suppress(ev) {
-                    ev._psDragIgnore = true;
-                    btn.removeEventListener('click', suppress);
-                }, { once: true });
-            }
         });
 
         document.body.appendChild(btn);
