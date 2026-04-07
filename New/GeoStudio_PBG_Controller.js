@@ -52,18 +52,7 @@
     let heartbeatWindow   = null;
     
     // Cross-domain handshake variables replacing broadcast channel
-    let pendingHeartbeatCid = null;
-    
-    // Listen for Heartbeat sending a 'READY' handshake, just like the Auditbook integration
-    window.addEventListener('message', function(e) {
-      if (e.data && e.data.type === 'HEARTBEAT_READY') {
-         if (pendingHeartbeatCid && heartbeatWindow && !heartbeatWindow.closed) {
-             console.log('[PBG] Received HEARTBEAT_READY handshake. Sending CID:', pendingHeartbeatCid);
-             heartbeatWindow.postMessage({ type: 'HEARTBEAT_TRIGGER', trigger: true, cidValue: pendingHeartbeatCid }, '*');
-             pendingHeartbeatCid = null; // consume
-         }
-      }
-    });
+    // We now use the URL Hybrid strategy for initialization and postMessage for live concurrent tabs
   
 
     // ── Styles ──────────────────────────────────────────────
@@ -193,15 +182,20 @@
       document.body.removeChild(ta);
     }
 
-    function openHeartbeatAndClickTranscript(cidValue) {
+        function openHeartbeatAndClickTranscript(cidValue) {
+      // 1. Preserve critical existing functionality:
       copyToClipboard(cidValue);
-      const url = 'https://heartbeat.cs.amazon.dev/#/';
+      
+      // 2. Secret URL Mailbox pattern for safe cross-origin transmission on fresh tabs
+      const freshUrl = 'https://heartbeat.cs.amazon.dev/#/?pulseCid=' + encodeURIComponent(cidValue);
+      
       if (!heartbeatWindow || heartbeatWindow.closed) {
-        heartbeatWindow = window.open(url, 'HeartbeatWindow');
-        setTimeout(() => heartbeatChannel.postMessage({ trigger: true, cidValue }), 3000);
+        console.log('[PBG] Opening fresh Heartbeat tab with URL Payload');
+        heartbeatWindow = window.open(freshUrl, 'HeartbeatWindow');
       } else {
+        console.log('[PBG] Heartbeat already open, dispatching direct postMessage');
         heartbeatWindow.focus();
-        heartbeatChannel.postMessage({ trigger: true, cidValue });
+        heartbeatWindow.postMessage({ type: 'HEARTBEAT_TRIGGER', trigger: true, cidValue: cidValue }, '*');
       }
     }
 

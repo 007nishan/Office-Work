@@ -448,13 +448,34 @@
         setTimeout(createButton, 300);
       }
     }, 1000);
-    var channel = new BroadcastChannel('ps_heartbeat_channel');
-    channel.onmessage = function (e) {
-      if (e.data && e.data.trigger) {
-        if (btn) btn.click();
-        else console.warn('PS_HEARTBEAT: btn not ready');
+    // --- CROSS-DOMAIN HYBRID INITIALIZATION --- //
+
+    // 1. Scrape URL Mailbox parameter first if present (From fresh GeoStudio launch)
+    var pulseMatch = window.location.hash.match(/[?&]pulseCid=([^&]+)/);
+    if (pulseMatch && pulseMatch[1]) {
+        var extractedCid = decodeURIComponent(pulseMatch[1]);
+        console.log('PS_HEARTBEAT: Fresh spawn caught URL mail: ', extractedCid);
+        window._latestCidPayload = extractedCid;
+        
+        // Clean up the URL quietly to prevent refresh loops or confusing the user
+        var cleanHash = window.location.hash.replace(/[?&]pulseCid=[^&]+/, '');
+        if (cleanHash === '#' || cleanHash === '') cleanHash = '#/';
+        window.history.replaceState(null, '', window.location.pathname + cleanHash);
+        
+        // Delay slightly just to allow React DOM to physically render before setup routines take over
+        setTimeout(triggerAction, 800); 
+    }
+
+    // 2. Listen for postMessage for all subsequent rapid clicks when tab is already fully open
+    window.addEventListener('message', function (e) {
+      if (e.data && e.data.type === 'HEARTBEAT_TRIGGER' && e.data.trigger) {
+        console.log("PS_HEARTBEAT: Received live CROSS-DOMAIN pulse! Payload:", e.data);
+        window._latestCidPayload = e.data.cidValue;
+        triggerAction(); 
       }
-    };
+    });
+
+    // ------------------------------------------ //
   });
 
 })();
