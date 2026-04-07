@@ -1,0 +1,826 @@
+// ==UserScript==
+// @name         CDP Board in GeoStudio
+// @namespace    http://tampermonkey.net/
+// @version      4.1
+// @description  Displays CDP from Attributes sources with auto-refresh on case load
+// @author       Nishanur
+// @match        https://na.geostudio.last-mile.amazon.dev/*
+// @match        https://eu.geostudio.last-mile.amazon.dev/*
+// @match        https://fe.geostudio.last-mile.amazon.dev/*
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    if (window.cdpBoardLoaded) {
+        console.log("CDP Board already loaded, skipping...");
+        return;
+    }
+    window.cdpBoardLoaded = true;
+
+    let cdpPanel = null;
+    let analyticsPanel = null;
+    let isVisible = true;
+    let isDragging = false;
+    let lastProcessedAddressId = null;
+    let isExtracting = false;
+    let cachedData = null;
+
+    const CONFIG = {
+        INITIAL_CASE_CHECK_DELAY: 3000,
+        EXTRACTION_WAIT: 2000,
+        CLICK_WAIT: 1500,
+        COLLAPSE_WAIT: 500,
+        DEBOUNCE_DELAY: 1000
+    };
+
+    function loadPosition() {
+        const saved = localStorage.getItem('cdpBoardPosition');
+        return saved ? JSON.parse(saved) : { top: '400px', right: '8px' };
+    }
+
+    function savePosition(top, right) {
+        localStorage.setItem('cdpBoardPosition', JSON.stringify({ top, right }));
+    }
+
+    function copyToClipboard(text) {
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+    }
+
+    function getAddressId() {
+        const allDivs = Array.from(document.querySelectorAll('div'));
+        const aidDiv = allDivs.find(div => div.textContent.includes('Address ID:'));
+        if (aidDiv) {
+            const match = aidDiv.textContent.match(/Address ID:\s*([A-Z0-9]+)/);
+            return match ? String(match) : null;
+        }
+        return null;
+    }
+
+    function extractPDLLocation(value) {
+        try {
+            const match = value.match(/"SafePlaceLocation_":"([^"]+)"/);
+            if (match) return match;
+
+            const jsonMatch = value.match(/:\s*"([A-Z_]+)"\s*\}/);
+            if (jsonMatch) return jsonMatch;
+
+            return value;
+        } catch (e) {
+            return value;
+        }
+    }
+
+    async function extractCDPData() {
+        if (isExtracting) {
+            console.log('Extraction already in progress, skipping...');
+            return null;
+        }
+
+        isExtracting = true;
+        console.log('=== EXTRACTING CDP DATA ===');
+
+        try {
+            await new Promise(r => setTimeout(r, CONFIG.EXTRACTION_WAIT));
+
+            const allDivs = Array.from(document.querySelectorAll('div'));
+            const attrSourcesButton = allDivs.find(div =>
+                div.textContent.trim() === 'Attributes sources' &&
+                div.className.includes('css-qcd6wc')
+            );
+
+            if (attrSourcesButton) {
+                attrSourcesButton.click();
+                console.log('✓ Clicked Attributes sources');
+                await new Promise(r => setTimeout(r, CONFIG.CLICK_WAIT));
+            } else {
+                console.log('✗ Attributes sources button not found');
+                isExtracting = false;
+                return null;
+            }
+
+            const attrSourcesSection = allDivs.find(div =>
+                div.textContent.includes('Attributes sources')
+            );
+
+            if (!attrSourcesSection) {
+                console.log('✗ Attributes sources section not found');
+                isExtracting = false;
+                return null;
+            }
+
+            const allParas = attrSourcesSection.querySelectorAll('p');
+            console.log('Total paragraphs found: ' + allParas.length);
+
+            const dhData = [];
+            const pdlData = [];
+
+            for (let i = 0; i < allParas.length; i++) {
+                const paraText = allParas[i].textContent.trim();
+
+                if (paraText === 'Preferred delivery locations' || paraText === 'Delivery hint') {
+                    const type = paraText;
+
+                    const nextPara = allParas[i+1].textContent.trim();
+                    const hasEmptyPara = (nextPara === '');
+
+                    let valueIndex, sourceIndex, timestampIndex;
+
+                    if (hasEmptyPara) {
+                        valueIndex = i + 3;
+                        sourceIndex = i + 5;
+                        timestampIndex = i + 7;
+                    } else {
+                        valueIndex = i + 2;
+                        sourceIndex = i + 4;
+                        timestampIndex = i + 6;
+                    }
+
+                    if (timestampIndex < allParas.length) {
+                        const value = allParas[valueIndex].textContent.trim();
+                        const source = allParas[sourceIndex].textContent.trim();
+                        const timestamp = allParas[timestampIndex].textContent.trim();
+
+                        const dataObj = {
+                            Value: value,
+                            Source: source,
+                            Timestamp: timestamp
+                        };
+
+                        if (type === 'Delivery hint') {
+                            dhData.push(dataObj);
+                            console.log('Extracted DH: Source=' + source + ', Timestamp=' + timestamp);
+                        } else {
+                            pdlData.push(dataObj);
+                            console.log('Extracted PDL: Source=' + source + ', Timestamp=' + timestamp);
+                        }
+                    }
+                }
+            }
+
+            console.log('Extracted DH: ' + dhData.length + ', PDL: ' + pdlData.length);
+
+            if (attrSourcesButton) {
+                attrSourcesButton.click();
+                console.log('✓ Collapsed Attributes sources');
+                await new Promise(r => setTimeout(r, CONFIG.COLLAPSE_WAIT));
+
+                const pastDeliveriesButton = allDivs.find(div =>
+                    div.textContent.trim() === 'Past deliveries' &&
+                    div.className.includes('css-qcd6wc')
+                );
+
+                if (pastDeliveriesButton) {
+                    pastDeliveriesButton.click();
+                    console.log('✓ Clicked Past deliveries');
+                }
+            }
+
+            function determineCDP(dhData, pdlData) {
+                const allEntries = [
+                    ...dhData.map(d => ({...d, Type: 'Delivery Hint'})),
+                    ...pdlData.map(d => ({...d, Type: 'Preferred Delivery Location'}))
+                ];
+
+                const customerEntries = allEntries.filter(e => e.Source === 'CUSTOMER');
+                const llmEntries = allEntries.filter(e => e.Source.includes('LLM_DERIVED'));
+                const otherEntries = allEntries.filter(e => e.Source !== 'CUSTOMER' && !e.Source.includes('LLM_DERIVED'));
+
+                let cdp = null;
+                let reasoning = '';
+
+                if (customerEntries.length > 0) {
+                    const dhCustomer = dhData.filter(d => d.Source === 'CUSTOMER');
+                    const pdlCustomer = pdlData.filter(d => d.Source === 'CUSTOMER');
+
+                    if (dhCustomer.length > 0 && pdlCustomer.length > 0) {
+                        let hasBothCorrect = false;
+                        for (const dh of dhCustomer) {
+                            for (const pdl of pdlCustomer) {
+                                if (dh.Timestamp === pdl.Timestamp) {
+                                    hasBothCorrect = true;
+                                    cdp = {
+                                        Type: 'DH_PDL Both Correct',
+                                        Value: 'Both DH and PDL valid locations',
+                                        Source: 'CUSTOMER',
+                                        Timestamp: dh.Timestamp
+                                    };
+                                    reasoning = 'DH and PDL have identical Customer source and timestamp (' + dh.Timestamp + '). No ground for comparison exists - cannot determine priority between DH and PDL.';
+                                    break;
+                                }
+                            }
+                            if (hasBothCorrect) break;
+                        }
+
+                        if (!hasBothCorrect) {
+                            customerEntries.sort((a, b) => new Date(b.Timestamp) - new Date(a.Timestamp));
+                            cdp = customerEntries.shift();
+                            const selectedType = cdp.Type === 'Delivery Hint' ? 'DH' : 'PDL';
+                            reasoning = 'Both DH and PDL have Customer source. ' + selectedType + ' timestamp (' + cdp.Timestamp + ') is more recent. Selected ' + selectedType + ' as CDP.';
+                        }
+                    } else if (dhCustomer.length > 0) {
+                        customerEntries.sort((a, b) => new Date(b.Timestamp) - new Date(a.Timestamp));
+                        cdp = customerEntries.shift();
+                        reasoning = 'Only DH has Customer source. Selected DH as CDP.';
+                    } else if (pdlCustomer.length > 0) {
+                        customerEntries.sort((a, b) => new Date(b.Timestamp) - new Date(a.Timestamp));
+                        cdp = customerEntries.shift();
+                        reasoning = 'Only PDL has Customer source. Selected PDL as CDP.';
+                    }
+                } else if (llmEntries.length > 0) {
+                    llmEntries.sort((a, b) => new Date(b.Timestamp) - new Date(a.Timestamp));
+                    cdp = llmEntries.shift();
+                    reasoning = 'No Customer source. LLM_DERIVED has second priority. Selected most recent LLM entry as CDP.';
+                } else if (otherEntries.length > 0) {
+                    otherEntries.sort((a, b) => new Date(b.Timestamp) - new Date(a.Timestamp));
+                    cdp = otherEntries.shift();
+                    reasoning = 'No Customer or LLM source. Selected most recent from other sources as CDP.';
+                }
+
+                return { cdp, reasoning };
+            }
+
+            function detectDHPDLBothCorrect(dhData, pdlData) {
+                const dhBySource = {};
+                const pdlBySource = {};
+
+                dhData.forEach(d => {
+                    if (!dhBySource[d.Source]) dhBySource[d.Source] = [];
+                    dhBySource[d.Source].push(d);
+                });
+
+                pdlData.forEach(d => {
+                    if (!pdlBySource[d.Source]) pdlBySource[d.Source] = [];
+                    pdlBySource[d.Source].push(d);
+                });
+
+                for (const source in dhBySource) {
+                    if (pdlBySource[source]) {
+                        for (const dh of dhBySource[source]) {
+                            for (const pdl of pdlBySource[source]) {
+                                if (dh.Timestamp === pdl.Timestamp) {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+                return false;
+            }
+
+            const { cdp, reasoning } = determineCDP(dhData, pdlData);
+            const hasBothCorrect = detectDHPDLBothCorrect(dhData, pdlData);
+
+            isExtracting = false;
+
+            return {
+                cdp: cdp,
+                reasoning: reasoning,
+                dhData: dhData,
+                pdlData: pdlData,
+                hasBothCorrect: hasBothCorrect,
+                extractedAt: new Date().toISOString()
+            };
+
+        } catch (error) {
+            console.log('Error during extraction: ' + error.message);
+            isExtracting = false;
+            return null;
+        }
+    }
+
+    function updateCDPBoardContent(data) {
+        if (!cdpPanel) return;
+
+        while (cdpPanel.childNodes.length > 0) {
+            cdpPanel.removeChild(cdpPanel.lastChild);
+        }
+
+        const closeBtn = createCloseButton();
+        cdpPanel.appendChild(closeBtn);
+
+        if (!data || !data.cdp) {
+            const noData = document.createElement('div');
+            noData.textContent = 'No CDP data found';
+            Object.assign(noData.style, {
+                fontSize: '14px',
+                fontFamily: 'Amazon Ember, Helvetica, Arial, sans-serif',
+                textAlign: 'center',
+                color: '#16191f',
+                marginTop: '24px',
+                marginBottom: '12px'
+            });
+            cdpPanel.appendChild(noData);
+
+            const retryBtn = document.createElement('button');
+            retryBtn.textContent = 'Retry Extraction';
+            Object.assign(retryBtn.style, {
+                width: '100%',
+                height: '32px',
+                backgroundColor: '#fff',
+                color: '#16191f',
+                fontWeight: '400',
+                fontSize: '14px',
+                fontFamily: 'Amazon Ember, Helvetica, Arial, sans-serif',
+                border: '1px solid #d5dbdb',
+                borderRadius: '8px',
+                cursor: 'pointer',
+                transition: 'all 0.2s'
+            });
+
+            retryBtn.addEventListener('mouseenter', () => {
+                retryBtn.style.backgroundColor = '#fafafa';
+                retryBtn.style.borderColor = '#879596';
+            });
+            retryBtn.addEventListener('mouseleave', () => {
+                retryBtn.style.backgroundColor = '#fff';
+                retryBtn.style.borderColor = '#d5dbdb';
+            });
+
+            retryBtn.onclick = async () => {
+                retryBtn.textContent = 'Extracting...';
+                retryBtn.disabled = true;
+                const newData = await extractCDPData();
+                cachedData = newData;
+                updateCDPBoardContent(newData);
+            };
+
+            cdpPanel.appendChild(retryBtn);
+            return;
+        }
+
+        if (data.hasBothCorrect) {
+            cdpPanel.style.backgroundColor = 'rgba(255, 0, 0, 0.1)';
+            cdpPanel.style.border = '2px solid #d13212';
+            cdpPanel.style.animation = 'glow 1.5s ease-in-out infinite';
+
+            if (!document.getElementById('cdpGlowStyle')) {
+                const style = document.createElement('style');
+                style.id = 'cdpGlowStyle';
+                style.textContent = '@keyframes glow { 0%, 100% { box-shadow: 0 0 10px rgba(209,50,18,0.3); } 50% { box-shadow: 0 0 20px rgba(209,50,18,0.5); } }';
+                document.head.appendChild(style);
+            }
+        } else {
+            cdpPanel.style.backgroundColor = 'rgba(255, 255, 255, 0.5)';
+            cdpPanel.style.border = '1px solid #d5dbdb';
+            cdpPanel.style.animation = 'none';
+        }
+
+        const cdpTypeHeader = document.createElement('div');
+        cdpTypeHeader.textContent = data.cdp.Type;
+        Object.assign(cdpTypeHeader.style, {
+            fontSize: '18px',
+            fontWeight: '700',
+            fontFamily: 'Amazon Ember, Helvetica, Arial, sans-serif',
+            color: '#16191f',
+            textAlign: 'center',
+            margin: '20px 0 16px 0',
+            cursor: 'pointer',
+            transition: 'color 0.2s',
+            lineHeight: '1.4'
+        });
+
+        cdpTypeHeader.addEventListener('mouseenter', () => {
+            cdpTypeHeader.style.color = '#0073bb';
+        });
+        cdpTypeHeader.addEventListener('mouseleave', () => {
+            cdpTypeHeader.style.color = '#16191f';
+        });
+
+        cdpTypeHeader.onclick = () => {
+            copyToClipboard('CDP from Attributes sources is ' + data.cdp.Type);
+            console.log('Copied: CDP from Attributes sources is ' + data.cdp.Type);
+        };
+
+        cdpPanel.appendChild(cdpTypeHeader);
+
+        let displayValue = data.cdp.Value.replace(/^["']|["']$/g, '');
+
+        if (data.cdp.Type === 'Preferred Delivery Location') {
+            displayValue = extractPDLLocation(displayValue);
+        }
+
+        const valueDiv = document.createElement('div');
+        valueDiv.textContent = displayValue;
+        Object.assign(valueDiv.style, {
+            fontSize: '14px',
+            fontFamily: 'Amazon Ember, Helvetica, Arial, sans-serif',
+            color: '#16191f',
+            wordBreak: 'break-word',
+            lineHeight: '1.5',
+            padding: '12px',
+            backgroundColor: '#f7f8f8',
+            borderRadius: '8px',
+            marginBottom: '12px'
+        });
+
+        cdpPanel.appendChild(valueDiv);
+
+        const analyticsBtn = document.createElement('button');
+        analyticsBtn.textContent = 'Analytics';
+        Object.assign(analyticsBtn.style, {
+            width: '100%',
+            height: '32px',
+            backgroundColor: '#fff',
+            color: '#16191f',
+            fontWeight: '400',
+            fontSize: '14px',
+            fontFamily: 'Amazon Ember, Helvetica, Arial, sans-serif',
+            border: '1px solid #d5dbdb',
+            borderRadius: '8px',
+            cursor: 'pointer',
+            transition: 'all 0.2s'
+        });
+
+        analyticsBtn.addEventListener('mouseenter', () => {
+            analyticsBtn.style.backgroundColor = '#fafafa';
+            analyticsBtn.style.borderColor = '#879596';
+        });
+        analyticsBtn.addEventListener('mouseleave', () => {
+            analyticsBtn.style.backgroundColor = '#fff';
+            analyticsBtn.style.borderColor = '#d5dbdb';
+        });
+
+        analyticsBtn.onclick = () => showAnalytics(data);
+
+        cdpPanel.appendChild(analyticsBtn);
+    }
+
+    function createCloseButton() {
+        const closeBtn = document.createElement('div');
+        closeBtn.innerHTML = '×';
+        Object.assign(closeBtn.style, {
+            position: 'absolute',
+            top: '8px',
+            right: '8px',
+            width: '24px',
+            height: '24px',
+            fontSize: '24px',
+            fontFamily: 'Amazon Ember, Helvetica, Arial, sans-serif',
+            fontWeight: '300',
+            color: '#545b64',
+            textAlign: 'center',
+            lineHeight: '24px',
+            cursor: 'pointer',
+            borderRadius: '4px',
+            transition: 'all 0.2s'
+        });
+
+        closeBtn.addEventListener('mouseenter', () => {
+            closeBtn.style.backgroundColor = '#f7f8f8';
+            closeBtn.style.color = '#16191f';
+        });
+        closeBtn.addEventListener('mouseleave', () => {
+            closeBtn.style.backgroundColor = 'transparent';
+            closeBtn.style.color = '#545b64';
+        });
+
+        closeBtn.onclick = () => {
+            if (cdpPanel) {
+                cdpPanel.style.display = 'none';
+                isVisible = false;
+            }
+        };
+
+        return closeBtn;
+    }
+
+    function createCDPBoard() {
+        if (document.getElementById('cdpBoardPanel')) {
+            console.log("CDP Board already exists");
+            return;
+        }
+
+        const position = loadPosition();
+
+        cdpPanel = document.createElement('div');
+        cdpPanel.id = 'cdpBoardPanel';
+        Object.assign(cdpPanel.style, {
+            position: 'fixed',
+            top: position.top,
+            right: position.right,
+            display: 'flex',
+            flexDirection: 'column',
+            backgroundColor: 'rgba(255, 255, 255, 0.5)',
+            border: '1px solid #d5dbdb',
+            borderRadius: '8px',
+            boxShadow: '0 4px 16px rgba(0,0,0,0.1)',
+            zIndex: '99999',
+            padding: '16px',
+            backdropFilter: 'blur(8px)',
+            pointerEvents: 'auto',
+            boxSizing: 'border-box',
+            transition: 'all 0.3s ease',
+            minWidth: '320px',
+            maxWidth: '400px',
+            cursor: 'move',
+            fontFamily: 'Amazon Ember, Helvetica, Arial, sans-serif'
+        });
+
+        const loading = document.createElement('div');
+        loading.textContent = 'Loading...';
+        Object.assign(loading.style, {
+            fontSize: '14px',
+            fontFamily: 'Amazon Ember, Helvetica, Arial, sans-serif',
+            textAlign: 'center',
+            color: '#545b64',
+            marginTop: '24px'
+        });
+        cdpPanel.appendChild(loading);
+
+        document.body.appendChild(cdpPanel);
+
+        setupDragging();
+
+        console.log("CDP Board created successfully");
+    }
+
+    function setupDragging() {
+        let startX, startY, startTop, startRight;
+
+        cdpPanel.addEventListener('mousedown', (e) => {
+            if (e.target.tagName === 'BUTTON' || e.target.innerHTML === '×') return;
+            isDragging = true;
+            startX = e.clientX;
+            startY = e.clientY;
+            startTop = parseInt(cdpPanel.style.top);
+            startRight = parseInt(cdpPanel.style.right);
+            cdpPanel.style.cursor = 'grabbing';
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (isDragging) {
+                const deltaX = e.clientX - startX;
+                const deltaY = e.clientY - startY;
+                cdpPanel.style.top = (startTop + deltaY) + 'px';
+                cdpPanel.style.right = (startRight - deltaX) + 'px';
+            }
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (isDragging) {
+                isDragging = false;
+                cdpPanel.style.cursor = 'move';
+                savePosition(cdpPanel.style.top, cdpPanel.style.right);
+            }
+        });
+    }
+
+    function showAnalytics(data) {
+        if (analyticsPanel) {
+            document.body.removeChild(analyticsPanel);
+            analyticsPanel = null;
+            return;
+        }
+
+        analyticsPanel = document.createElement('div');
+        Object.assign(analyticsPanel.style, {
+            position: 'fixed',
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            backgroundColor: 'rgba(255, 255, 255, 0.95)',
+            border: '1px solid #d5dbdb',
+            borderRadius: '8px',
+            boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
+            zIndex: '100000',
+            padding: '24px',
+            maxWidth: '600px',
+            maxHeight: '80vh',
+            overflow: 'auto',
+            backdropFilter: 'blur(10px)',
+            fontFamily: 'Amazon Ember, Helvetica, Arial, sans-serif'
+        });
+
+        const closeBtn = document.createElement('div');
+        closeBtn.innerHTML = '×';
+        Object.assign(closeBtn.style, {
+            position: 'absolute',
+            top: '8px',
+            right: '8px',
+            width: '24px',
+            height: '24px',
+            fontSize: '24px',
+            fontFamily: 'Amazon Ember, Helvetica, Arial, sans-serif',
+            fontWeight: '300',
+            color: '#545b64',
+            textAlign: 'center',
+            lineHeight: '24px',
+            cursor: 'pointer',
+            borderRadius: '4px',
+            transition: 'all 0.2s'
+        });
+
+        closeBtn.addEventListener('mouseenter', () => {
+            closeBtn.style.backgroundColor = '#f7f8f8';
+            closeBtn.style.color = '#16191f';
+        });
+        closeBtn.addEventListener('mouseleave', () => {
+            closeBtn.style.backgroundColor = 'transparent';
+            closeBtn.style.color = '#545b64';
+        });
+
+        closeBtn.onclick = () => {
+            document.body.removeChild(analyticsPanel);
+            analyticsPanel = null;
+        };
+
+        analyticsPanel.appendChild(closeBtn);
+
+        const title = document.createElement('div');
+        title.textContent = 'CDP Analytics';
+        Object.assign(title.style, {
+            fontSize: '20px',
+            fontWeight: '700',
+            color: '#16191f',
+            marginBottom: '16px',
+            marginTop: '16px',
+            textAlign: 'center'
+        });
+        analyticsPanel.appendChild(title);
+
+        const reasoningDiv = document.createElement('div');
+        reasoningDiv.innerHTML = '<b>Reasoning:</b> ' + data.reasoning;
+        Object.assign(reasoningDiv.style, {
+            marginBottom: '16px',
+            fontSize: '14px',
+            lineHeight: '1.5',
+            color: '#16191f'
+        });
+        analyticsPanel.appendChild(reasoningDiv);
+
+        const dhTitle = document.createElement('div');
+        dhTitle.textContent = 'Delivery Hint Entries (' + data.dhData.length + ')';
+        Object.assign(dhTitle.style, {
+            fontWeight: '700',
+            marginTop: '16px',
+            marginBottom: '8px',
+            fontSize: '16px',
+            color: '#16191f'
+        });
+        analyticsPanel.appendChild(dhTitle);
+
+        data.dhData.forEach((dh, idx) => {
+            const entry = createAnalyticsEntry(idx + 1, dh);
+            analyticsPanel.appendChild(entry);
+        });
+
+        const pdlTitle = document.createElement('div');
+        pdlTitle.textContent = 'Preferred Delivery Location Entries (' + data.pdlData.length + ')';
+        Object.assign(pdlTitle.style, {
+            fontWeight: '700',
+            marginTop: '16px',
+            marginBottom: '8px',
+            fontSize: '16px',
+            color: '#16191f'
+        });
+        analyticsPanel.appendChild(pdlTitle);
+
+        data.pdlData.forEach((pdl, idx) => {
+            const entry = createAnalyticsEntry(idx + 1, pdl);
+            analyticsPanel.appendChild(entry);
+        });
+
+        if (data.hasBothCorrect) {
+            const warning = document.createElement('div');
+            warning.textContent = '⚠️ DH PDL BOTH CORRECT: Same source with identical timestamps!';
+            Object.assign(warning.style, {
+                marginTop: '16px',
+                padding: '12px',
+                backgroundColor: '#fef6f6',
+                border: '1px solid #d13212',
+                borderRadius: '8px',
+                fontSize: '14px',
+                fontWeight: '700',
+                color: '#d13212'
+            });
+            analyticsPanel.appendChild(warning);
+        }
+
+        document.body.appendChild(analyticsPanel);
+    }
+
+    function createAnalyticsEntry(num, data) {
+        const entry = document.createElement('div');
+        Object.assign(entry.style, {
+            padding: '12px',
+            marginBottom: '8px',
+            backgroundColor: '#f7f8f8',
+            borderRadius: '8px',
+            fontSize: '14px',
+            lineHeight: '1.5',
+            color: '#16191f'
+        });
+
+        entry.innerHTML = '<b>' + num + '.</b> <b>Value:</b> ' + data.Value.substring(0, 100) + '... <b>Source:</b> ' + data.Source + ' <b>Timestamp:</b> ' + data.Timestamp;
+
+        return entry;
+    }
+
+    let shiftPressCount = 0;
+    let shiftTimer = null;
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Shift' && e.location === 1) {
+            shiftPressCount++;
+
+            if (shiftTimer) clearTimeout(shiftTimer);
+
+            shiftTimer = setTimeout(() => {
+                if (shiftPressCount === 1) {
+                    isVisible = !isVisible;
+                    if (cdpPanel) {
+                        cdpPanel.style.display = isVisible ? 'flex' : 'none';
+                    }
+                    console.log('CDP Board visibility: ' + isVisible);
+                }
+                shiftPressCount = 0;
+            }, 300);
+        }
+    });
+
+    let debounceTimer = null;
+
+    function checkMutation(m) {
+        if (m.target.textContent?.includes('Address ID:')) {
+            if (debounceTimer) clearTimeout(debounceTimer);
+
+            debounceTimer = setTimeout(async () => {
+                const currentAid = getAddressId();
+
+                if (!currentAid) {
+                    console.log('No Address ID found');
+                    return;
+                }
+
+                if (currentAid === lastProcessedAddressId) {
+                    console.log('Same Address ID (' + currentAid + '), skipping extraction');
+                    return;
+                }
+
+                console.log('New case detected: ' + currentAid + ' (previous: ' + lastProcessedAddressId + ')');
+                lastProcessedAddressId = currentAid;
+
+                if (cdpPanel) {
+                    while (cdpPanel.childNodes.length > 0) {
+                        cdpPanel.removeChild(cdpPanel.lastChild);
+                    }
+                    const loading = document.createElement('div');
+                    loading.textContent = 'Loading...';
+                    Object.assign(loading.style, {
+                        fontSize: '14px',
+                        fontFamily: 'Amazon Ember, Helvetica, Arial, sans-serif',
+                        textAlign: 'center',
+                        color: '#545b64',
+                        marginTop: '24px'
+                    });
+                    cdpPanel.appendChild(loading);
+                }
+
+                const data = await extractCDPData();
+                cachedData = data;
+                updateCDPBoardContent(data);
+            }, CONFIG.DEBOUNCE_DELAY);
+
+            return true;
+        }
+        return false;
+    }
+
+    const observer = new MutationObserver((mutations) => {
+        for (const m of mutations) {
+            if (checkMutation(m)) break;
+        }
+    });
+
+    function init() {
+        createCDPBoard();
+
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true,
+            attributes: true
+        });
+
+        setTimeout(async () => {
+            const aid = getAddressId();
+            if (aid) {
+                console.log('Initial case: ' + aid);
+                lastProcessedAddressId = aid;
+                const data = await extractCDPData();
+                cachedData = data;
+                updateCDPBoardContent(data);
+            }
+        }, CONFIG.INITIAL_CASE_CHECK_DELAY);
+    }
+
+    init();
+
+})();
+
