@@ -1,0 +1,2334 @@
+// ==UserScript==
+// @name         GeoStudio PBG Controller V12.0 (Combined)
+// @namespace    http://tampermonkey.net/?
+// @version      13.1
+// @author       RDR + @rohanjit + @nthakurn @ggopaamz @nkadaver
+// @description  Combined: PBG Controller + POD Panel + GAM DP Triage Controller
+// @match        https://na.geostudio.last-mile.amazon.dev/*
+// @match        https://eu.geostudio.last-mile.amazon.dev/*
+// @match        https://na.templates.geostudio.last-mile.amazon.dev/*
+// @match        https://eu.templates.geostudio.last-mile.amazon.dev/*
+// @match        https://fe.templates.geostudio.last-mile.amazon.dev/*
+// @grant        none
+// ==/UserScript==
+
+(function () {
+  "use strict";
+
+  // ─── CONTEXT DETECTION ───────────────────────────────────────────────────────
+  const IS_IFRAME = window.self !== window.top;
+  const IS_MAIN   = !IS_IFRAME;
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // SECTION 1 — SHARED UTILITIES (used by all sections)
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  async function waitFor(selectorOrFn, timeout = 10000, interval = 200) {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      try {
+        const el = (typeof selectorOrFn === 'function')
+          ? selectorOrFn()
+          : document.querySelector(selectorOrFn);
+        if (el) return el;
+      } catch (e) {}
+      await delay(interval);
+    }
+    return null;
+  }
+
+  function showSimplePopup(message, t = 1600) {
+    const popup = document.createElement('div');
+    popup.textContent = message;
+    Object.assign(popup.style, {
+      position: 'fixed', top: '10%', right: '50%',
+      transform: 'translate(-50%, -50%)', padding: '10px 18px',
+      backgroundColor: 'rgba(0,0,0,0.85)', color: '#fff',
+      borderRadius: '8px', fontFamily: 'Amazon Ember, Arial, sans-serif',
+      zIndex: 99999
+    });
+    document.body.appendChild(popup);
+    setTimeout(() => popup.remove(), t);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // SECTION 2 — MAIN PAGE (IS_MAIN) — PBG CONTROLLER + PANEL
+  // ══════════════════════════════════════════════════════════════════════════════
+  if (IS_MAIN) {
+
+    const CONFIG = {
+      DEBOUNCE_DELAY: 1000,
+      SELECTION_THROTTLE: 1000,
+      MIN_NOTIFICATION_INTERVAL: 100,
+      MODAL_OPEN_DELAY: 1000,
+      INITIAL_CASE_CHECK_DELAY: 2000,
+      PANEL_RECHECK_DELAY: 500,
+      NOTIFICATION_DURATION: {
+        GAM: 5000, CLASSIFIER: 5000, ERROR: 8000, SUCCESS: 5000,
+        QUEUE_ALERT: 8000, QUEUE_CHANGE: 5000,
+      },
+      // Full field extraction list — includes all fields needed for display & logic
+      CASE_FIELDS: [
+        "TaskTemplateId", "Queue Name", "TrackingId", "TRACKING_ID",
+        "ProcessedInRDR", "Geofencereduction25m", "Geofencecreation",
+        "SuggestedGeocodesDP", "SuggestedGeocodesRE", "pbgEnabled",
+        "defecttype", "Defecttype", "defectcount", "EventDate",
+        "ComId1", "orderingorderid1", "ComId2", "orderingorderid2",
+        "CountofContacts", "DefectRate",
+      ],
+      QUEUE_PATTERNS: {
+        SUGGESTED_GEOCODES: ["VOC_SDS_NA_GS", "VOC_SDS_NA_GS_PID", "VOC_SDS_NA_GC90_GS_PID", "VOC_SDS_NA_GC90_GS"],
+        POM_GEOCODE: ["RDR_POM", "RDR_GEOSPATIAL_POM", "RDR_POM_KNOWN", "RDR_VOC_SDS_POM", "RDR_VOC_UTL_POM"],
+      },
+      CLASSIFICATION: {
+        MESSAGES: {
+          VERIFICATION_NEEDED: "Found unclear CDP information. Please validate DH & PDL manually and select correction level.",
+          NO_CDP_VERIFICATION: "No CDP Information Found\n\n<strong>Disclaimer:</strong>This case has 'No PDL & DH'; please check deliveries before choosing Unit or AID level correction",
+        },
+      },
+      GEOFENCE: { MIN_STANDARD: 25, MIN_REDUCTION: 10, CREATION_PLACEHOLDER: -1 },
+    };
+
+    const DOM_SELECTORS = {
+      CASE_DETAILS_BUTTON: 'button[mdn-popover-offset="-12"][aria-controls="task"]',
+      CASE_DETAIL_ITEM: ".css-wncc9b",
+      CASE_DETAIL_KEY: ".css-1wmy4xi",
+      CASE_DETAIL_VALUE: ".css-189kjnx",
+      ADDRESS_ID_LABEL: "p.css-198b8k6",
+      CUSTOMER_ADDRESS_SECTION: ".css-1xats7y",
+      UNIT_ADDRESS_SECTION: ".css-1iomfh4",
+      ADDRESS_TEXT: ".css-hd6zo3",
+      ADDRESS_CONTAINER: ".css-14olvtr",
+      RADIO_INPUT: 'input[type="radio"]',
+      PDL_CONTAINER: ".css-b1l7p0",
+      PDL_VALUE: "[mdn-select-value]",
+      DH_ACCORDION: ".MuiAccordion-root",
+      DH_VALUE: ".css-1hndvw4[mdn-text]",
+      GEOFENCE_CIRCLE: "#geofence",
+      GEOFENCE_POLYGON: "#poly_geofence",
+      SUBMIT_BUTTON: '#submit-btn, button[aria-controls="submit"]',
+      SUBMIT_MODAL: 'div.css-vp3tcr[role="dialog"]',
+      SUBMIT_CLOSE_BUTTON: "button.css-148awne",
+      LIVE_CASE_INDICATOR: '[mdn-popover-offset="-12"][aria-controls="task"]',
+      PAST_DEL_TEXT: "p.css-1oqpb4x",
+      PAST_DEL_ROW: "div.css-s8qwt0",
+      PAST_DEL_TBA: "p.css-oshm15",
+      PAST_DEL_DATE: "p.css-oz22nj",
+      PAST_DEL_PHOTO_BTN: 'button[aria-label="View photo"]',
+      LAYERS_BUTTON: "#layers-icon",
+      LAYERS_CONTAINER: ".css-1pvmvej",
+    };
+
+    const PATTERNS = {
+      LOCATION: /(front|back|side)?\s*(porch|garage|entrance|gate|deck|yard|driveway|mailbox|box|bin|bench|steps|stoop|lobby|locker)/i,
+    };
+
+    const ABBREVIATIONS = {
+      PKWY: "PARKWAY", PKY: "PARKWAY", ST: "STREET", STR: "STREET",
+      RD: "ROAD", AVE: "AVENUE", AV: "AVENUE", LN: "LANE", DR: "DRIVE",
+      BLVD: "BOULEVARD", CT: "COURT", CIR: "CIRCLE", PL: "PLACE",
+      TER: "TERRACE", TRL: "TRAIL", HWY: "HIGHWAY", SQ: "SQUARE",
+      APT: "APARTMENT", STE: "SUITE", UNIT: "UNIT",
+      N: "NORTH", S: "SOUTH", E: "EAST", W: "WEST",
+      NE: "NORTHEAST", NW: "NORTHWEST", SE: "SOUTHEAST", SW: "SOUTHWEST",
+    };
+
+    // ── Tracking tab opener (from pod_sCRIPT) ──────────────────────────────────
+    let R_podSearchTab = null;
+    let R_podSelectionTab = null;
+
+    function openTrackingTab(trackingId, isContextMenu = false) {
+      const url = `https://logistics.amazon.com/internal/performance/daf-tool?pageId=da_focus_tool&tabId=tba-deliveries-daily-tab&timeFrame=Daily&trackingId=${trackingId}`;
+      if (isContextMenu) {
+        if (!R_podSelectionTab || R_podSelectionTab.closed) {
+          R_podSelectionTab = window.open(url, 'r_podSelectionTab');
+        } else {
+          R_podSelectionTab.location.href = url;
+          R_podSelectionTab.focus();
+        }
+      } else {
+        if (!R_podSearchTab || R_podSearchTab.closed) {
+          R_podSearchTab = window.open(url, 'r_podSearchTab');
+        } else {
+          R_podSearchTab.location.href = url;
+          R_podSearchTab.focus();
+        }
+      }
+    }
+
+    // Right-click on selected TBA → open tracking tab
+    document.addEventListener('contextmenu', (e) => {
+      const selection = window.getSelection()?.toString()?.trim();
+      if (selection && /^TBA[a-zA-Z0-9]+$/.test(selection)) {
+        e.preventDefault();
+        openTrackingTab(selection, true);
+      }
+    });
+
+    // ── Copy to clipboard helper ───────────────────────────────────────────────
+    async function copyToClipboard(text, labelEl) {
+      if (!text || text === 'N/A' || text === '-') return;
+      try {
+        await navigator.clipboard.writeText(text);
+        if (labelEl) {
+          const orig = labelEl.textContent;
+          labelEl.textContent = '✓ Copied!';
+          labelEl.style.color = '#1d8102';
+          setTimeout(() => {
+            labelEl.textContent = orig;
+            labelEl.style.color = '';
+          }, 1200);
+        }
+      } catch (e) {}
+    }
+
+    // ── Utils ──────────────────────────────────────────────────────────────────
+    const Utils = {
+      debounce(func, wait) {
+        let timeout;
+        return function (...args) {
+          clearTimeout(timeout);
+          timeout = setTimeout(() => func(...args), wait);
+        };
+      },
+      waitForElement(selector, timeout = 10000) {
+        return new Promise((resolve, reject) => {
+          const start = Date.now();
+          const check = () => {
+            const el = document.querySelector(selector);
+            if (el) resolve(el);
+            else if (Date.now() - start > timeout) reject(new Error("Element " + selector + " not found"));
+            else setTimeout(check, 100);
+          };
+          check();
+        });
+      },
+      sanitizeHTML(str) { const d = document.createElement("div"); d.textContent = str; return d.innerHTML; },
+    };
+
+    const TextUtils = {
+      isEmpty(text) {
+        const ev = ["", "n/a", "na", "select safe place type", "select property delivery preference", "no hints added", "no mandate"];
+        return !text || ev.includes((text || "").trim().toLowerCase());
+      },
+      isFrontDoor(text) {
+        if (this.isEmpty(text)) return false;
+        return text.toLowerCase().replace(/deliver to\s+/i, "").replace(/\s+/g, "").trim() === "frontdoor";
+      },
+      hasLocationPattern(text) { return PATTERNS.LOCATION.test(text.trim().toLowerCase()); },
+      hasAdditionalText(text) { return !this.isEmpty(text) && !this.isFrontDoor(text); },
+    };
+
+    const AddressUtils = {
+      clean(a) { return a.replace(/[,\/#!$%\^&\*;:{}=\-_`~()]/g, " ").replace(/\s+/g, " ").trim(); },
+      standardizeToken(t) { return ABBREVIATIONS[t.toUpperCase()] || t; },
+      compare(unitAddr, custAddr) {
+        try {
+          if (!unitAddr || !custAddr) return { isMatch: false, differences: { missing: true } };
+          const cu = this.clean(unitAddr), cc = this.clean(custAddr);
+          const pr = /\b\d{5}(-\d{4})?\b/;
+          const up = cu.match(pr), cp = cc.match(pr);
+          const diff = { postalCode: null, tokens: null };
+          if (up || cp) {
+            const ub = up ? up[0].substring(0, 5) : null, cb = cp ? cp[0].substring(0, 5) : null;
+            if (ub !== cb) diff.postalCode = { unit: up ? up[0] : "missing", customer: cp ? cp[0] : "missing" };
+          }
+          const ut = cu.replace(pr, "").trim().split(" ").filter(t => t.length > 0).map(t => this.standardizeToken(t));
+          const ct = cc.replace(pr, "").trim().split(" ").filter(t => t.length > 0).map(t => this.standardizeToken(t));
+          const uu = ut.filter(t => !ct.includes(t)), uc = ct.filter(t => !ut.includes(t));
+          let aptDiff = false;
+          const uai = ut.findIndex(t => ["APARTMENT", "APT", "UNIT"].includes(t.toUpperCase()));
+          const cai = ct.findIndex(t => ["APARTMENT", "APT", "UNIT"].includes(t.toUpperCase()));
+          if (uai !== -1 && cai !== -1 && ut[uai + 1] !== ct[cai + 1]) aptDiff = true;
+          if (uu.length > 0 || uc.length > 0 || aptDiff) diff.tokens = { unit: uu.length > 0 ? uu : null, customer: uc.length > 0 ? uc : null, apartmentDifference: aptDiff };
+          const has = Object.values(diff).some(d => d !== null);
+          return { isMatch: !has, differences: has ? diff : null };
+        } catch (e) { return { isMatch: false, differences: { error: true } }; }
+      },
+    };
+
+    const DOMExtractor = {
+      cache: { addressId: null, unitAddress: null, customerAddress: null, radioElements: null, lastCacheTime: null },
+      getAddressId() {
+        try {
+          const l = Array.from(document.querySelectorAll(DOM_SELECTORS.ADDRESS_ID_LABEL)).find(el => el.textContent.trim() === "Address ID:");
+          return l?.nextElementSibling?.querySelector("p")?.textContent.trim() || null;
+        } catch (e) { return null; }
+      },
+      extractAddressData() {
+        const aid = this.getAddressId();
+        if (this.cache.addressId === aid && this.cache.unitAddress) return this.cache;
+        try {
+          const cs = document.querySelector(DOM_SELECTORS.CUSTOMER_ADDRESS_SECTION);
+          let ca = null; if (cs) ca = cs.querySelector(DOM_SELECTORS.ADDRESS_TEXT)?.textContent.trim() || null;
+          const aus = document.querySelectorAll(DOM_SELECTORS.UNIT_ADDRESS_SECTION);
+          let ua = null, us = null;
+          for (let i = 0; i < aus.length; i++) {
+            if ((aus[i].querySelector(".css-1wfat2i")?.textContent.trim() || "") === "Unit") {
+              ua = aus[i].querySelector(DOM_SELECTORS.ADDRESS_TEXT)?.textContent.trim() || null; us = aus[i]; break;
+            }
+          }
+          const ar = Array.from(document.querySelectorAll(DOM_SELECTORS.ADDRESS_CONTAINER + " " + DOM_SELECTORS.RADIO_INPUT));
+          this.cache = { addressId: aid, unitAddress: ua, customerAddress: ca, radioElements: { allRadios: ar, unitSection: us, customerSection: cs }, lastCacheTime: Date.now() };
+          return this.cache;
+        } catch (e) { return { addressId: aid, unitAddress: null, customerAddress: null, radioElements: null, lastCacheTime: Date.now() }; }
+      },
+      getCurrentSelection() {
+        const d = this.extractAddressData();
+        if (!d.radioElements || !d.radioElements.allRadios) return "ADDRESS LEVEL";
+        try {
+          for (const r of d.radioElements.allRadios) {
+            if (r.checked || r.getAttribute("aria-checked") === "true") {
+              const c = r.closest(DOM_SELECTORS.UNIT_ADDRESS_SECTION + ", " + DOM_SELECTORS.CUSTOMER_ADDRESS_SECTION);
+              if (c) { if (c.textContent.includes("Address ID:")) return "ADDRESS LEVEL"; if (c.textContent.includes("Unit") && c.classList.contains("css-1iomfh4")) return "UNIT LEVEL"; }
+            }
+          }
+        } catch (e) {}
+        return "ADDRESS LEVEL";
+      },
+      async extractCaseDetails(fields) {
+        try {
+          const btn = await Utils.waitForElement(DOM_SELECTORS.CASE_DETAILS_BUTTON);
+          btn.click(); await delay(CONFIG.MODAL_OPEN_DELAY);
+          const det = {}; for (const f of fields) det[f] = this.extractCaseDetailField(f);
+          btn.click(); return det;
+        } catch (e) { return null; }
+      },
+      extractCaseDetailField(key) {
+        try {
+          for (const item of document.querySelectorAll(DOM_SELECTORS.CASE_DETAIL_ITEM)) {
+            const k = item.querySelector(DOM_SELECTORS.CASE_DETAIL_KEY), v = item.querySelector(DOM_SELECTORS.CASE_DETAIL_VALUE);
+            if (k?.textContent.trim() === key) return v?.textContent.trim() || "EXTRACTION_FAILED";
+          }
+          return "N/A";
+        } catch (e) { return "EXTRACTION_FAILED"; }
+      },
+      getPDL() {
+        try {
+          for (const el of Array.from(document.querySelectorAll("*")).filter(el => el.textContent.trim() === "Preferred Delivery Location")) {
+            const p = el.closest(DOM_SELECTORS.PDL_CONTAINER); if (p) { const v = p.querySelector(DOM_SELECTORS.PDL_VALUE); if (v) return v.textContent.trim(); }
+          }
+          for (const el of document.querySelectorAll('[id^="select-"][id$="-value"][mdn-select-value]')) {
+            const p = el.closest(DOM_SELECTORS.PDL_CONTAINER); if (p) { const l = p.querySelector("p[mdn-text]"); if (l && l.textContent.trim() === "Preferred Delivery Location") return el.textContent.trim(); }
+          }
+          return "";
+        } catch (e) { return "EXTRACTION_FAILED"; }
+      },
+      getDriverHint() {
+        try {
+          for (const acc of Array.from(document.querySelectorAll(DOM_SELECTORS.DH_ACCORDION)).filter(a => { const s = a.querySelector("p[mdn-text]"); return s && s.textContent.trim() === "Delivery Instructions"; })) {
+            const h = acc.querySelector(DOM_SELECTORS.DH_VALUE); if (h) { const t = h.textContent.trim(); return t === "No hints added" ? "" : t; }
+          }
+          for (const l of Array.from(document.querySelectorAll("*")).filter(el => el.textContent.trim() === "Driver delivery hint")) {
+            const p = l.closest(".css-133gu5o"); if (p) { const v = p.querySelector(".css-1hndvw4"); if (v) { const t = v.textContent.trim(); return t === "No hints added" ? "" : t; } }
+          }
+          return "";
+        } catch (e) { return "EXTRACTION_FAILED"; }
+      },
+      getCurrentGeofence() {
+        try {
+          if (document.querySelector(DOM_SELECTORS.GEOFENCE_POLYGON)) return { mode: "polygon", value: "Polygon Mode" };
+          const c = document.querySelector(DOM_SELECTORS.GEOFENCE_CIRCLE); return { mode: "circle", value: c?.value || "0" };
+        } catch (e) { return { mode: "circle", value: "0" }; }
+      },
+      clearCache() { this.cache = { addressId: null, unitAddress: null, customerAddress: null, radioElements: null, lastCacheTime: null }; },
+    };
+
+    const CaseDetailsManager = {
+      caseData: null, initialAddressData: null, currentAddressId: null,
+      trackingSearchResult: null,
+      async extractCaseDetails(addressId) {
+        if (this.currentAddressId === addressId && this.caseData) return this.caseData;
+        const d = await DOMExtractor.extractCaseDetails(CONFIG.CASE_FIELDS);
+        if (d) { this.caseData = d; this.currentAddressId = addressId; }
+        return d;
+      },
+      extractInitialAddressData() {
+        if (this.initialAddressData) return this.initialAddressData;
+        this.initialAddressData = { pdl: DOMExtractor.getPDL(), dh: DOMExtractor.getDriverHint() };
+        return this.initialAddressData;
+      },
+      getCaseField(f) { return this.caseData ? this.caseData[f] : null; },
+      getTrackingId() {
+        if (!this.caseData) return null;
+        const t1 = this.caseData["TrackingId"], t2 = this.caseData["TRACKING_ID"];
+        if (t1 && t1 !== "N/A" && t1 !== "EXTRACTION_FAILED") return t1;
+        if (t2 && t2 !== "N/A" && t2 !== "EXTRACTION_FAILED") return t2;
+        return null;
+      },
+      getDefectType() {
+        if (!this.caseData) return null;
+        // Try both casings
+        const d1 = this.caseData["defecttype"], d2 = this.caseData["Defecttype"];
+        if (d1 && d1 !== "N/A" && d1 !== "EXTRACTION_FAILED") return d1;
+        if (d2 && d2 !== "N/A" && d2 !== "EXTRACTION_FAILED") return d2;
+        return null;
+      },
+      getInitialAddressData() { return this.initialAddressData; },
+      clear() {
+        this.caseData = null; this.initialAddressData = null;
+        this.currentAddressId = null; this.trackingSearchResult = null;
+      },
+    };
+
+    const QueueDetector = {
+      detectQueueType(t) {
+        if (!t || t === "N/A" || t === "EXTRACTION_FAILED") return { type: null, pattern: null };
+        const u = t.toUpperCase();
+        for (const p of CONFIG.QUEUE_PATTERNS.SUGGESTED_GEOCODES) { if (u.includes(p.toUpperCase())) return { type: "SUGGESTED_GEOCODES", pattern: p }; }
+        for (const p of CONFIG.QUEUE_PATTERNS.POM_GEOCODE) { if (u.includes(p.toUpperCase())) return { type: "POM_GEOCODE", pattern: p }; }
+        return { type: null, pattern: null };
+      },
+      shouldShowSuggestedGeocodesAlert(t, s) {
+        if (this.detectQueueType(t).type === "SUGGESTED_GEOCODES") return s && s !== "N/A" && s !== "EXTRACTION_FAILED" && s.trim() !== "";
+        return false;
+      },
+      shouldShowPOMAlert(t) { return this.detectQueueType(t).type === "POM_GEOCODE"; },
+    };
+
+    const GeofenceValidator = {
+      validate(value, cd) {
+        const n = parseFloat(value); if (isNaN(n)) return { valid: false, message: "Invalid value" };
+        const isR = (cd.Geofencereduction25m || "").toLowerCase() === "yes";
+        const isC = (cd.Geofencecreation || "").toLowerCase() === "yes";
+        const min = isR ? CONFIG.GEOFENCE.MIN_REDUCTION : CONFIG.GEOFENCE.MIN_STANDARD;
+        if (isC && n === CONFIG.GEOFENCE.CREATION_PLACEHOLDER) return { valid: true, message: "Creation case with -1 value (min: " + min + "m)" };
+        if (n < min) return { valid: false, message: "Too low. Min: " + min + "m (Reduction " + (isR ? "on" : "off") + ")" };
+        return { valid: true, message: "Valid (min: " + min + "m, Reduction " + (isR ? "on" : "off") + ")" };
+      },
+    };
+
+    const GAMValidator = { validate(u, c) { return AddressUtils.compare(u, c); } };
+
+    const ClassificationValidator = {
+      classify(pdl, dh) {
+        pdl = (pdl || "").trim(); dh = (dh || "").trim();
+        if (TextUtils.hasLocationPattern(pdl)) return { classification: "ADDRESS LEVEL", needsVerification: false, reason: "PDL contains specific location" };
+        if (TextUtils.isEmpty(pdl) && TextUtils.isEmpty(dh)) return { classification: null, needsVerification: true, reason: "No CDP information - verification required for gate/mailroom cases" };
+        if (TextUtils.isFrontDoor(pdl) && TextUtils.isEmpty(dh)) return { classification: "UNIT LEVEL", needsVerification: false, reason: "Front door PDL with empty DH" };
+        if (TextUtils.isFrontDoor(pdl) && TextUtils.isFrontDoor(dh)) return { classification: "UNIT LEVEL", needsVerification: false, reason: "Both PDL and DH are front door" };
+        if (TextUtils.isFrontDoor(pdl) && TextUtils.hasAdditionalText(dh)) return { classification: null, needsVerification: true, reason: "Front door PDL with additional DH text" };
+        if (TextUtils.isEmpty(pdl) && !TextUtils.isEmpty(dh)) return { classification: null, needsVerification: true, reason: "Empty PDL with DH text" };
+        if (!TextUtils.isEmpty(pdl) && !TextUtils.hasLocationPattern(pdl) && !TextUtils.isFrontDoor(pdl)) return { classification: null, needsVerification: true, reason: "PDL has unclear information" };
+        return { classification: "ADDRESS LEVEL", needsVerification: false, reason: "Default to address level" };
+      },
+    };
+
+    // ── Past Deliveries Helper ─────────────────────────────────────────────────
+    const PastDeliveriesHelper = {
+      isProcessing: false, isTrackingSearching: false, retryAttempt: 0,
+      delay(ms) { return new Promise(r => setTimeout(r, ms)); },
+      findPastDeliveriesAccordion() {
+        const accordions = document.querySelectorAll('.MuiAccordion-root');
+        for (const acc of accordions) {
+          const pEl = acc.querySelector(DOM_SELECTORS.PAST_DEL_TEXT);
+          if (pEl && pEl.textContent.trim() === 'Past deliveries') return acc;
+        }
+        return null;
+      },
+      isPastDeliveriesExpanded() {
+        const acc = this.findPastDeliveriesAccordion();
+        if (!acc) return false;
+        return acc.classList.contains('Mui-expanded');
+      },
+      hasComboboxesInAccordion() {
+        const acc = this.findPastDeliveriesAccordion();
+        if (!acc) return false;
+        return acc.querySelectorAll('div[role="combobox"][mdn-input-box]').length > 0;
+      },
+      findMeridianComboboxInPastDel(labelText) {
+        const acc = this.findPastDeliveriesAccordion();
+        if (!acc) return null;
+        const comboboxes = acc.querySelectorAll('div[role="combobox"][mdn-input-box]');
+        for (const box of comboboxes) {
+          const valueEl = box.querySelector('[mdn-select-value]');
+          if (valueEl && valueEl.textContent.trim().includes(labelText)) return box;
+        }
+        return null;
+      },
+      async openMeridianCombobox(box) {
+        box.focus(); await this.delay(100);
+        box.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+        await this.delay(50);
+        box.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+        await this.delay(50);
+        box.click(); await this.delay(300);
+        if (box.getAttribute('aria-expanded') === 'true') return true;
+        box.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40, bubbles: true, cancelable: true }));
+        await this.delay(300);
+        if (box.getAttribute('aria-expanded') === 'true') return true;
+        box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true }));
+        await this.delay(300);
+        if (box.getAttribute('aria-expanded') === 'true') return true;
+        box.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', keyCode: 32, bubbles: true, cancelable: true }));
+        await this.delay(300);
+        return box.getAttribute('aria-expanded') === 'true';
+      },
+      async selectOption(label) {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const options = document.querySelectorAll('div[role="option"], li[role="option"]');
+          for (const opt of options) {
+            if (opt.textContent.trim() === label) {
+              opt.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+              await this.delay(30);
+              opt.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+              await this.delay(30);
+              opt.click(); return true;
+            }
+          }
+          const listboxId = document.querySelector('div[role="combobox"][aria-expanded="true"]')?.getAttribute('aria-controls');
+          if (listboxId) {
+            const listbox = document.getElementById(listboxId);
+            if (listbox) {
+              const items = listbox.querySelectorAll('*');
+              for (const item of items) {
+                if (item.textContent.trim() === label && item.children.length === 0) {
+                  item.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                  await this.delay(30); item.click(); return true;
+                }
+              }
+            }
+          }
+          await this.delay(200);
+        }
+        return false;
+      },
+      async waitForEnabled(box, timeout = 3000) {
+        const start = Date.now();
+        while (Date.now() - start < timeout) {
+          if (box.getAttribute('aria-disabled') !== 'true') return true;
+          await this.delay(200);
+        }
+        return false;
+      },
+      isAlreadyConfigured() {
+        const acc = this.findPastDeliveriesAccordion();
+        if (!acc) return false;
+        const comboboxes = acc.querySelectorAll('div[role="combobox"][mdn-input-box]');
+        let hasCount = false, hasAll = false;
+        for (const box of comboboxes) {
+          const valueEl = box.querySelector('[mdn-select-value]');
+          if (!valueEl) continue;
+          const text = valueEl.textContent.trim();
+          if (text === 'Count') hasCount = true;
+          if (text === 'All') hasAll = true;
+        }
+        return hasCount && hasAll;
+      },
+      async openPastDeliveries() {
+        if (this.isPastDeliveriesExpanded()) return true;
+        const acc = this.findPastDeliveriesAccordion();
+        if (!acc) return false;
+        const summary = acc.querySelector('.MuiAccordionSummary-root');
+        if (!summary) return false;
+        const pastBtn = acc.querySelector(DOM_SELECTORS.PAST_DEL_TEXT);
+        if (pastBtn) pastBtn.scrollIntoView({ behavior: "smooth", block: "center" });
+        await this.delay(200);
+        summary.click(); await this.delay(2000);
+        return this.isPastDeliveriesExpanded();
+      },
+      async waitForComboboxes(timeout = 5000) {
+        const start = Date.now();
+        while (Date.now() - start < timeout) {
+          if (this.hasComboboxesInAccordion()) return true;
+          await this.delay(300);
+        }
+        return false;
+      },
+      async configureAttributeAndFilter() {
+        try {
+          if (!this.isPastDeliveriesExpanded()) {
+            const opened = await this.openPastDeliveries();
+            if (!opened) return false;
+          }
+          await this.waitForComboboxes();
+          if (this.isAlreadyConfigured()) return true;
+          let attrBox = this.findMeridianComboboxInPastDel('Attribute') || this.findMeridianComboboxInPastDel('Count');
+          if (!attrBox) return false;
+          const valueEl = attrBox.querySelector('[mdn-select-value]');
+          if (!valueEl || valueEl.textContent.trim() !== 'Count') {
+            const opened = await this.openMeridianCombobox(attrBox);
+            if (!opened) return false;
+            await this.delay(300);
+            const selected = await this.selectOption('Count');
+            if (!selected) return false;
+            await this.delay(500);
+          }
+          let filterBox = this.findMeridianComboboxInPastDel('Filter') ||
+            this.findMeridianComboboxInPastDel('Recent') ||
+            this.findMeridianComboboxInPastDel('All');
+          if (!filterBox) {
+            const acc = this.findPastDeliveriesAccordion();
+            if (acc) {
+              const comboboxes = acc.querySelectorAll('div[role="combobox"][mdn-input-box]');
+              const countBox = this.findMeridianComboboxInPastDel('Count');
+              for (const box of comboboxes) {
+                if (box !== attrBox && box !== countBox) { filterBox = box; break; }
+              }
+            }
+          }
+          if (filterBox) {
+            const filterValue = filterBox.querySelector('[mdn-select-value]');
+            if (filterValue && filterValue.textContent.trim() === 'All') return true;
+            const enabled = await this.waitForEnabled(filterBox);
+            if (!enabled) return false;
+            await this.delay(300);
+            const filterOpened = await this.openMeridianCombobox(filterBox);
+            if (!filterOpened) return false;
+            await this.delay(300);
+            await this.selectOption('All');
+            await this.delay(300);
+          }
+          return true;
+        } catch (e) { return false; }
+      },
+      async autoOpenAndSetFilters() {
+        if (this.isProcessing) return;
+        this.isProcessing = true;
+        try {
+          await this.delay(1500);
+          const success = await this.configureAttributeAndFilter();
+          if (!success && this.retryAttempt < 2) {
+            this.retryAttempt++;
+            this.isProcessing = false;
+            await this.delay(2000);
+            return await this.autoOpenAndSetFilters();
+          }
+          this.retryAttempt = 0;
+        } catch (e) { this.retryAttempt = 0; }
+        this.isProcessing = false;
+      },
+      async searchTracking(trackingId) {
+        if (this.isTrackingSearching || !trackingId) return;
+        this.isTrackingSearching = true;
+        try {
+          this.clearHighlights();
+          if (!this.isPastDeliveriesExpanded()) {
+            await this.openPastDeliveries();
+            await this.waitForComboboxes();
+            await this.configureAttributeAndFilter();
+            await this.delay(800);
+          } else if (!this.isAlreadyConfigured()) {
+            await this.configureAttributeAndFilter();
+            await this.delay(500);
+          }
+          const result = this.scanForTracking(trackingId);
+          if (result.found) {
+            result.row.classList.add('pbg-delivery-highlight');
+            result.row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            await this.delay(400);
+            // Open photo if button exists — highlight stays even after photo is closed
+            const photoBtn = result.row.querySelector(DOM_SELECTORS.PAST_DEL_PHOTO_BTN);
+            const photoStatus = photoBtn ? 'opened' : 'no-button';
+            if (photoBtn) photoBtn.click();
+            CaseDetailsManager.trackingSearchResult = {
+              trackingId, searched: true, found: true,
+              delivery: { date: result.date, reason: result.reason, defect: result.defect, placeId: result.placeId, photoStatus },
+            };
+            // Highlight persists until new case loads (cleared in reset())
+          } else {
+            CaseDetailsManager.trackingSearchResult = { trackingId, searched: true, found: false, delivery: null };
+            // Show a visible notification popup for no match
+            NotificationManager.show("WARNING", "Tracking Not Found",
+              trackingId + "\n\nNo matching delivery found in Past Deliveries.",
+              CONFIG.NOTIFICATION_DURATION.CLASSIFIER);
+          }
+          if (CaseDetailsManager.caseData) CaseDetailsPanel.update(CaseDetailsManager.caseData, false, null);
+        } catch (e) {
+          CaseDetailsManager.trackingSearchResult = { trackingId, searched: true, found: false, delivery: null };
+          NotificationManager.show("ERROR", "Search Failed", "Could not search for tracking ID. Please try again.", CONFIG.NOTIFICATION_DURATION.ERROR);
+          if (CaseDetailsManager.caseData) CaseDetailsPanel.update(CaseDetailsManager.caseData, false, null);
+        }
+        this.isTrackingSearching = false;
+      },
+      scanForTracking(trackingId) {
+        const rows = document.querySelectorAll(DOM_SELECTORS.PAST_DEL_ROW);
+        for (const row of rows) {
+          const tbaEl = row.querySelector('.css-16947m2 ' + DOM_SELECTORS.PAST_DEL_TBA);
+          if (tbaEl && tbaEl.textContent.trim() === trackingId) {
+            return {
+              found: true, row,
+              date: this.extractField(row, 'date'),
+              reason: this.extractField(row, 'Reason'),
+              defect: this.extractField(row, 'Defect'),
+              placeId: this.extractField(row, 'Place Id'),
+            };
+          }
+        }
+        return { found: false };
+      },
+      extractField(row, fieldName) {
+        if (fieldName === 'date') {
+          const dateEl = row.querySelector('.css-j4z1in ' + DOM_SELECTORS.PAST_DEL_DATE);
+          return dateEl ? dateEl.textContent.trim() : 'N/A';
+        }
+        const labels = row.querySelectorAll(DOM_SELECTORS.PAST_DEL_TBA);
+        for (const label of labels) {
+          const text = label.textContent.trim();
+          if (text === fieldName + ' |' || text === fieldName + ' | ') {
+            const valueEl = label.nextElementSibling;
+            if (valueEl) return valueEl.textContent.trim();
+          }
+        }
+        return null;
+      },
+      clearHighlights() {
+        document.querySelectorAll('.pbg-delivery-highlight').forEach(el => el.classList.remove('pbg-delivery-highlight'));
+      },
+    };
+
+    // ── Styles ─────────────────────────────────────────────────────────────────
+    const STYLES = `
+/* ── Panel shell ── */
+.pbg-cp{position:fixed;width:272px;max-height:calc(100vh - 60px);background:#f7f8fa;border:1px solid #d0d7de;border-radius:10px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:11.5px;color:#1f2328;z-index:9997;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 6px 20px rgba(0,0,0,0.13),0 1px 4px rgba(0,0,0,0.07)}
+.pbg-cp.hidden{display:none}
+.pbg-cp.minimized .pbg-cp-body{display:none}
+.pbg-cp.minimized{max-height:none;height:auto}
+.pbg-cp.dragging{opacity:0.88;box-shadow:0 14px 40px rgba(0,0,0,0.18);transition:none}
+/* ── Scale variants (A− / A+) ── */
+.pbg-cp.scale-sm{width:240px;font-size:10.5px}
+.pbg-cp.scale-sm .pbg-cp-lbl{font-size:8.5px;min-width:62px}
+.pbg-cp.scale-sm .pbg-cp-val,.pbg-cp.scale-sm .pbg-cp-copy-val,.pbg-cp.scale-sm .pbg-cp-trk-val{font-size:10px}
+.pbg-cp.scale-lg{width:330px;font-size:13px}
+.pbg-cp.scale-lg .pbg-cp-lbl{font-size:11px;min-width:94px}
+.pbg-cp.scale-lg .pbg-cp-val,.pbg-cp.scale-lg .pbg-cp-copy-val,.pbg-cp.scale-lg .pbg-cp-trk-val{font-size:13px}
+/* ── Topbar / drag handle ── */
+.pbg-cp-topbar{display:flex;align-items:center;justify-content:space-between;padding:7px 10px;background:linear-gradient(135deg,#3b6fd4,#2451a8);flex-shrink:0;cursor:grab;user-select:none}
+.pbg-cp-topbar:active{cursor:grabbing}
+.pbg-cp-topbar-left{display:flex;align-items:center;gap:7px}
+.pbg-cp-topbar-dot{width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,0.55)}
+.pbg-cp-topbar-title{font-size:10.5px;font-weight:700;color:#fff;letter-spacing:.5px;text-transform:uppercase}
+.pbg-cp-topbar-btns{display:flex;gap:3px;align-items:center}
+.pbg-cp-topbar-btn{background:none;border:none;cursor:pointer;padding:3px 6px;color:rgba(255,255,255,0.75);font-size:11px;line-height:1;transition:all .12s;border-radius:4px;font-weight:600}
+.pbg-cp-topbar-btn:hover{color:#fff;background:rgba(255,255,255,0.2)}
+.pbg-cp-topbar-btn.size-btn{font-size:10px;padding:2px 5px}
+/* ── Body ── */
+.pbg-cp-body{overflow-y:auto;flex:1;padding:8px 11px 8px;scrollbar-width:thin;scrollbar-color:#d0d7de transparent}
+.pbg-cp-body::-webkit-scrollbar{width:3px}
+.pbg-cp-body::-webkit-scrollbar-thumb{background:#d0d7de;border-radius:2px}
+/* ── Separator ── */
+.pbg-cp-sep{height:1px;background:#e6e9ed;margin:5px 0}
+/* ── Row ── */
+.pbg-cp-row{display:flex;align-items:center;padding:3px 0;font-size:11px;line-height:1.4;gap:8px;min-height:22px}
+.pbg-cp-lbl{color:#6e7781;font-weight:500;min-width:82px;flex-shrink:0;font-size:10px;letter-spacing:.1px}
+.pbg-cp-val{color:#1f2328;word-break:break-all;flex:1;font-size:11.5px}
+.pbg-cp-val.bold{font-weight:700;color:#2451a8;font-size:11.5px;letter-spacing:-.1px}
+/* ── Tags ── */
+.pbg-cp-tag{display:inline-block;padding:2px 9px;border-radius:10px;font-size:10px;font-weight:600;line-height:1.6}
+.pbg-cp-tag-g{background:#ddf4ff;color:#0969da;border:1px solid #b6e3ff}
+.pbg-cp-tag-ok{background:#dcffe4;color:#1a7f37;border:1px solid #a9f0c8}
+.pbg-cp-tag-err{background:#ffebe9;color:#cf222e;border:1px solid #ffc1ba}
+/* ── Copy rows ── */
+.pbg-cp-copy{cursor:pointer;border-radius:5px;padding:3px 6px;margin:0 -6px;transition:background .1s;display:flex;align-items:center;gap:8px}
+.pbg-cp-copy:hover{background:#f0f6ff}
+.pbg-cp-copy-val{color:#0969da;font-weight:600;font-size:11.5px;word-break:break-all;flex:1}
+.pbg-cp-copy-icon{font-size:12px;color:#b6c4cf;flex-shrink:0;transition:color .1s;line-height:1}
+.pbg-cp-copy:hover .pbg-cp-copy-icon{color:#0969da}
+/* ── Tracking ── */
+.pbg-cp-trk{padding:2px 0}
+.pbg-cp-trk-val{color:#1f2328;font-weight:600;font-size:10.5px;word-break:break-all;margin-bottom:4px}
+.pbg-cp-trk-btns{display:flex;gap:4px}
+.pbg-cp-trk-btn{display:inline-flex;align-items:center;gap:2px;padding:2px 8px;border-radius:10px;font-size:9px;font-weight:600;cursor:pointer;border:1px solid;transition:all .12s;line-height:1.5;white-space:nowrap}
+.pbg-cp-trk-btn.search{background:#f0f6ff;color:#0969da;border-color:#b6e3ff}
+.pbg-cp-trk-btn.search:hover{background:#ddf4ff;border-color:#0969da}
+.pbg-cp-trk-btn.pod{background:#fff8f0;color:#bc4c00;border-color:#ffd8b5}
+.pbg-cp-trk-btn.pod:hover{background:#ffd8b5;border-color:#bc4c00}
+/* ── Tracking result ── */
+.pbg-cp-trk-result{margin-top:7px;padding:7px 10px;border-radius:7px;border:1px solid #e8ecf0;background:#f6f8fa}
+.pbg-cp-trk-result-header{font-size:10px;font-weight:600;color:#1f2328;margin-bottom:4px;display:flex;align-items:center;justify-content:space-between}
+.pbg-cp-trk-result-count{font-size:9px;background:#0969da;color:#fff;padding:1px 6px;border-radius:8px;font-weight:500}
+.pbg-cp-trk-del-row{display:flex;gap:8px;padding:2px 0}
+.pbg-cp-trk-del-lbl{color:#6e7781;font-weight:500;min-width:48px;font-size:9.5px}
+.pbg-cp-trk-del-val{color:#1f2328;font-weight:500;word-break:break-all;font-size:10.5px}
+.pbg-cp-trk-del-val.defect{color:#cf222e;font-weight:600}
+.pbg-cp-trk-del-val.photo-ok{color:#1a7f37}
+.pbg-cp-trk-del-val.photo-none{color:#9a6700}
+/* ── Geo ── */
+.pbg-cp-geo{display:flex;align-items:center;gap:4px;padding:4px 8px;border-radius:6px;font-size:10px;font-weight:500;margin-top:4px}
+.pbg-cp-geo.ok{background:#dcffe4;color:#1a7f37;border:1px solid #a9f0c8}
+.pbg-cp-geo.bad{background:#ffebe9;color:#cf222e;border:1px solid #ffc1ba}
+.pbg-delivery-highlight{background:#fef8f0 !important;border:2px solid #f2ab00 !important;border-radius:4px !important;animation:pbgPulse 1.5s ease-in-out 3;box-shadow:0 2px 8px rgba(242,171,0,.35) !important;padding:6px !important}
+.pbg-notif-wrap{position:fixed;right:380px;top:50%;transform:translateY(-50%);z-index:9998;width:240px;pointer-events:none;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;transition:opacity .2s}
+.pbg-notif-wrap.hidden{opacity:0;pointer-events:none}
+.pbg-notif{padding:6px 8px;margin-bottom:5px;border-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,.12);color:#fff;opacity:0;transform:translateX(100%);transition:all .25s;pointer-events:auto;font-size:10px}
+.pbg-notif.show{opacity:1;transform:translateX(0)}
+.pbg-notif.success{background:#1d8102;border-left:3px solid #1a7001}
+.pbg-notif.error{background:#d13212;border-left:3px solid #b02a0c}
+.pbg-notif.warning{background:#f2ab00;border-left:3px solid #d99a00;color:#232f3e}
+.pbg-notif.info{background:#0073bb;border-left:3px solid #005f9e}
+.pbg-notif.queue-alert{background:#7b1fa2;border-left:3px solid #5c1880;animation:pbgPulse 1.5s infinite}
+.pbg-notif.pom-alert{background:#c65d07;border-left:3px solid #a04d06;animation:pbgPulse 1.5s infinite}
+.pbg-notif-title{font-size:10px;font-weight:600;margin-bottom:2px}
+.pbg-notif-body{font-size:9px;line-height:1.3;opacity:.95;white-space:pre-line}
+.pbg-qcn{position:fixed;top:50px;left:700px;background:#232f3e;color:#fff;padding:6px 10px;border-radius:4px;font-size:9px;font-weight:500;z-index:9998;box-shadow:0 2px 8px rgba(0,0,0,.25);opacity:0;transform:translateX(-20px);pointer-events:none;transition:opacity .3s,transform .3s;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;min-width:140px;max-width:240px;border-left:3px solid #0073bb}
+.pbg-qcn.show{opacity:1;transform:translateX(0)}.pbg-qcn.hide{opacity:0;transform:translateX(-20px)}
+.pbg-qcn .ql{font-size:8px;opacity:.85;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;padding-bottom:2px;border-bottom:1px solid rgba(255,255,255,.2)}
+.pbg-qcn .qc{line-height:1.4}.pbg-qcn .qi{margin:2px 0;font-size:8px}.pbg-qcn .qi.prev{opacity:.6}.pbg-qcn .qi.prev .qv{text-decoration:line-through}
+.pbg-qcn .qi.cur .qv{color:#81c995;font-weight:700;font-size:9px}.pbg-qcn .qi .qk{color:rgba(255,255,255,.7);font-size:7px;margin-right:2px}
+.pbg-qcn .sq{font-size:9px;font-weight:600;color:#8ab4f8;word-break:break-all}.pbg-qcn .qa{text-align:center;color:#8ab4f8;font-size:10px;margin:2px 0}
+.pbg-mo{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.12);z-index:10000;animation:pbgFI .15s;pointer-events:none}
+.pbg-md{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;padding:14px;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.18);z-index:10001;max-width:300px;width:85%;animation:pbgMSI .2s;pointer-events:auto;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
+.pbg-md.rs{top:10%;left:60%;transform:translate(-50%,0);max-width:360px;width:auto;min-width:300px;animation:pbgMSIT .2s}
+.pbg-md-t{font-size:13px;font-weight:600;margin-bottom:8px;color:#232f3e;text-align:center;border-bottom:1px solid #eaeded;padding-bottom:6px}
+.pbg-md-c{margin-bottom:12px;color:#5f6368;font-size:11px;line-height:1.5;text-align:center}
+.pbg-md.rs .pbg-md-c{font-size:10px;line-height:1.6;text-align:left;white-space:pre-line;max-height:60vh;overflow-y:auto}
+.pbg-md-btns{display:flex;justify-content:center;gap:6px;flex-wrap:wrap}
+.pbg-md-btn{padding:5px 12px;border-radius:4px;border:none;cursor:pointer;font-weight:500;font-size:10px;color:#fff;min-width:80px;transition:background .12s}
+.pbg-md-btn.primary{background:#0073bb}.pbg-md-btn.primary:hover{background:#005f9e}
+.pbg-md-btn.secondary{background:#687078}.pbg-md-btn.secondary:hover{background:#545b64}
+.pbg-md-btn.danger{background:#d13212}.pbg-md-btn.danger:hover{background:#b02a0c}
+.pbg-sm{position:fixed;right:330px;bottom:20px;padding:2px 6px;border-radius:3px;box-shadow:0 1px 3px rgba(0,0,0,.1);font-size:8px;z-index:9997;max-width:130px;animation:pbgSU .2s;font-weight:500;text-align:center;line-height:1.2;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
+.pbg-sm.match{background:#f2fcf3;color:#1d8102;border:1px solid #d5f0d7}
+.pbg-sm.mismatch{background:#fdf3f1;color:#d13212;border:1px solid #fbd4c9}
+.pbg-sm .sl{font-weight:600;display:block;margin-bottom:1px;font-size:7px;text-transform:uppercase;letter-spacing:.2px}
+@keyframes pbgFI{from{opacity:0}to{opacity:1}}
+@keyframes pbgMSI{from{opacity:0;transform:translate(-50%,-48%) scale(.95)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
+@keyframes pbgMSIT{from{opacity:0;transform:translate(-50%,-30px)}to{opacity:1;transform:translate(-50%,0)}}
+@keyframes pbgSU{from{opacity:0;transform:translateY(15px)}to{opacity:1;transform:translateY(0)}}
+@keyframes pbgPulse{0%,100%{opacity:1}50%{opacity:.7}}
+`;
+
+    function injectStyles() { const s = document.createElement("style"); s.textContent = STYLES; document.head.appendChild(s); }
+
+    // ── Case Details Panel ─────────────────────────────────────────────────────
+    const CaseDetailsPanel = {
+      element: null, isVisible: false, isMinimized: false,
+      isSubmissionInProgress: false, _userMoved: false, _scale: '',
+      modalObserver: null, queueChangeNotification: null, queueChangeTimeout: null,
+
+      create() {
+        if (this.element) return this.element;
+        this.element = document.createElement("div");
+        this.element.className = "pbg-cp hidden";
+        this.positionPanel();
+        document.body.appendChild(this.element);
+        this.setupModalObserver();
+        return this.element;
+      },
+
+      positionPanel() {
+        if (!this.element) return;
+        if (this._userMoved) return; // user dragged it — don't reset position
+        const layersContainer = document.querySelector(DOM_SELECTORS.LAYERS_CONTAINER);
+        const layersBtn = document.querySelector(DOM_SELECTORS.LAYERS_BUTTON);
+        if (layersContainer && layersBtn) {
+          const rect = layersContainer.getBoundingClientRect();
+          const btnRect = layersBtn.getBoundingClientRect();
+          this.element.style.position = 'fixed';
+          this.element.style.left = rect.left + 'px';
+          this.element.style.top = (btnRect.bottom + 8) + 'px';
+        } else {
+          this.element.style.position = 'fixed';
+          this.element.style.left = '16px';
+          this.element.style.top = '120px';
+        }
+      },
+
+      setupModalObserver() {
+        if (this.modalObserver) return;
+        this.modalObserver = new MutationObserver(() => {
+          const submitModal = document.querySelector(DOM_SELECTORS.SUBMIT_MODAL);
+          const isViewingCase = document.querySelector(DOM_SELECTORS.LIVE_CASE_INDICATOR);
+          if (submitModal) {
+            if (!this.isSubmissionInProgress) { this.isSubmissionInProgress = true; this.hide(); }
+          } else if (isViewingCase && this.isSubmissionInProgress) {
+            this.isSubmissionInProgress = false;
+            if (CaseDetailsManager.caseData) this.update(CaseDetailsManager.caseData, false, null);
+          }
+        });
+        this.modalObserver.observe(document.body, { childList: true, subtree: true });
+      },
+
+      showQueueChangeNotification(newQueue, previousQueue = null) {
+        if (this.queueChangeNotification) { this.queueChangeNotification.remove(); this.queueChangeNotification = null; }
+        if (this.queueChangeTimeout) { clearTimeout(this.queueChangeTimeout); this.queueChangeTimeout = null; }
+        const n = document.createElement("div"); n.className = "pbg-qcn";
+        if (previousQueue && newQueue !== previousQueue) {
+          n.innerHTML = '<div class="ql">Queue Changed</div><div class="qc"><div class="qi prev"><span class="qk">FROM</span><span class="qv">' + Utils.sanitizeHTML(previousQueue) + '</span></div><div class="qa">↓</div><div class="qi cur"><span class="qk">TO</span><span class="qv">' + Utils.sanitizeHTML(newQueue) + '</span></div></div>';
+        } else {
+          n.innerHTML = '<div class="ql">Current Queue</div><div class="qc"><div class="sq">' + Utils.sanitizeHTML(newQueue) + '</div></div>';
+        }
+        document.body.appendChild(n); this.queueChangeNotification = n;
+        setTimeout(() => { if (n && n.parentNode) n.classList.add("show"); }, 50);
+        this.queueChangeTimeout = setTimeout(() => {
+          if (n && n.parentNode) { n.classList.remove("show"); n.classList.add("hide"); setTimeout(() => { if (n.parentNode) n.remove(); if (this.queueChangeNotification === n) this.queueChangeNotification = null; }, 300); }
+        }, CONFIG.NOTIFICATION_DURATION.QUEUE_CHANGE);
+      },
+
+      // ── PANEL CONTENT — REDESIGNED ───────────────────────────────────────────
+      // Displays exactly: TaskTemplateId, TrackingId, DefectType,
+      //   ComId1, orderingorderid1, ComId2, orderingorderid2,
+      //   CountofContacts, DefectRate
+      update(cd, queueChanged = false, previousQueue = null) {
+        if (!this.element) this.create();
+        if (this.isSubmissionInProgress) return;
+
+        const dec = cd.TaskTemplateId + (cd.pbgEnabled === "true" ? "_PID" : "");
+        const tid = CaseDetailsManager.getTrackingId();
+        const hasTrk = tid && tid !== "N/A" && tid !== "EXTRACTION_FAILED";
+
+        // Resolve defecttype (handles both casings)
+        const defectType = CaseDetailsManager.getDefectType() || cd.defecttype || cd.Defecttype || "N/A";
+        const hasDefect = defectType && defectType !== "N/A" && defectType !== "EXTRACTION_FAILED";
+
+        const comId1       = cd.ComId1 || "N/A";
+        const orderId1     = cd.orderingorderid1 || "N/A";
+        const comId2       = cd.ComId2 || "N/A";
+        const orderId2     = cd.orderingorderid2 || "N/A";
+        const contactCount = cd.CountofContacts || "N/A";
+        const defectRate   = cd.DefectRate || "N/A";
+
+        const hasComId1   = comId1   !== "N/A" && comId1   !== "EXTRACTION_FAILED";
+        const hasOrderId1 = orderId1 !== "N/A" && orderId1 !== "EXTRACTION_FAILED";
+        const hasComId2   = comId2   !== "N/A" && comId2   !== "EXTRACTION_FAILED";
+        const hasOrderId2 = orderId2 !== "N/A" && orderId2 !== "EXTRACTION_FAILED";
+
+        const wasMinimized = this.isMinimized;
+        this.element.className = "pbg-cp" + (wasMinimized ? " minimized" : "");
+
+        // ── Helper: build a copy-on-click row ──────────────────────────────────
+        const copyRow = (label, val, hasVal, dataAttr) => {
+          if (!hasVal) {
+            return `<div class="pbg-cp-row">
+              <div class="pbg-cp-lbl">${label}</div>
+              <div class="pbg-cp-val" style="color:#c8c8c8;font-style:italic;">—</div>
+            </div>`;
+          }
+          return `<div class="pbg-cp-row pbg-cp-copy" data-copy="${Utils.sanitizeHTML(val)}" data-label="${Utils.sanitizeHTML(label)}">
+            <div class="pbg-cp-lbl">${label}</div>
+            <div class="pbg-cp-copy-val">${Utils.sanitizeHTML(val)}</div>
+            <div class="pbg-cp-copy-icon">⎘</div>
+          </div>`;
+        };
+
+        let bodyHTML = '';
+
+        // 1. TaskTemplateId
+        bodyHTML += `<div class="pbg-cp-row">
+          <div class="pbg-cp-lbl">TaskTemplateId</div>
+          <div class="pbg-cp-val bold">${Utils.sanitizeHTML(dec)}</div>
+        </div>`;
+
+        bodyHTML += '<div class="pbg-cp-sep"></div>';
+
+        // 2. TrackingId — opens logistics page on click
+        bodyHTML += this.buildTrackingRow(tid, hasTrk);
+
+        bodyHTML += '<div class="pbg-cp-sep"></div>';
+
+        // 3. DefectType — copy on click if present
+        bodyHTML += hasDefect
+          ? `<div class="pbg-cp-row pbg-cp-copy" data-copy="${Utils.sanitizeHTML(defectType)}" data-label="DefectType">
+               <div class="pbg-cp-lbl">DefectType</div>
+               <div class="pbg-cp-copy-val"><span class="pbg-cp-tag pbg-cp-tag-err">${Utils.sanitizeHTML(defectType)}</span></div>
+               <div class="pbg-cp-copy-icon">⎘</div>
+             </div>`
+          : `<div class="pbg-cp-row">
+               <div class="pbg-cp-lbl">DefectType</div>
+               <div class="pbg-cp-val" style="color:#c8c8c8;font-style:italic;">—</div>
+             </div>`;
+
+        bodyHTML += '<div class="pbg-cp-sep"></div>';
+
+        // 4-7. ComId1 / orderId1 / ComId2 / orderId2 — copy on click
+        bodyHTML += copyRow('ComId1',           comId1,   hasComId1,   'comid1');
+        bodyHTML += copyRow('orderingorderid1', orderId1, hasOrderId1, 'orderid1');
+        bodyHTML += copyRow('ComId2',           comId2,   hasComId2,   'comid2');
+        bodyHTML += copyRow('orderingorderid2', orderId2, hasOrderId2, 'orderid2');
+
+        bodyHTML += '<div class="pbg-cp-sep"></div>';
+
+        // 8. CountofContacts — copy on click
+        bodyHTML += copyRow('Contacts', contactCount, contactCount !== "N/A" && contactCount !== "EXTRACTION_FAILED", 'contacts');
+
+        // 9. DefectRate — copy on click
+        bodyHTML += copyRow('DefectRate', defectRate, defectRate !== "N/A" && defectRate !== "EXTRACTION_FAILED", 'defectrate');
+
+        this.element.innerHTML =
+          '<div class="pbg-cp-topbar">' +
+            '<div class="pbg-cp-topbar-left">' +
+              '<div class="pbg-cp-topbar-dot"></div>' +
+              '<span class="pbg-cp-topbar-title">Case Data</span>' +
+            '</div>' +
+            '<div class="pbg-cp-topbar-btns">' +
+              '<button class="pbg-cp-topbar-btn size-btn" data-action="shrink" title="Decrease size">A−</button>' +
+              '<button class="pbg-cp-topbar-btn size-btn" data-action="grow"   title="Increase size">A+</button>' +
+              '<button class="pbg-cp-topbar-btn" data-action="minimize">' + (wasMinimized ? '+' : '−') + '</button>' +
+            '</div>' +
+          '</div>' +
+          '<div class="pbg-cp-body">' + bodyHTML + '</div>';
+
+        this.positionPanel();
+        this.setupHandlers();
+        this.show();
+      },
+
+      // TrackingId row — two buttons:
+      //   [🔍 Search in Past Deliveries]  ← original search-in-panel behaviour
+      //   [↗ Open POD Tool]              ← opens logistics page in new tab
+      buildTrackingRow(tid, hasTrk) {
+        if (!hasTrk) {
+          return `<div class="pbg-cp-row">
+            <div class="pbg-cp-lbl">TrackingId</div>
+            <div class="pbg-cp-val" style="color:#c8c8c8;font-style:italic;">—</div>
+          </div>`;
+        }
+
+        let resultHTML = '';
+        const sr = CaseDetailsManager.trackingSearchResult;
+        if (sr && sr.searched && sr.trackingId === tid) {
+          if (sr.found && sr.delivery) {
+            const d = sr.delivery;
+            const isDefect = d.defect && d.defect !== 'N/A';
+            const photoClass = d.photoStatus === 'opened' ? 'photo-ok' : 'photo-none';
+            const photoText = d.photoStatus === 'opened' ? 'Opened ✓' : (d.photoStatus === 'no-button' ? 'No button' : 'Not opened');
+            resultHTML =
+              '<div class="pbg-cp-trk-result">' +
+                '<div class="pbg-cp-trk-result-header"><span>Delivery Found</span><span class="pbg-cp-trk-result-count">1</span></div>' +
+                '<div class="pbg-cp-trk-del-row"><span class="pbg-cp-trk-del-lbl">Date</span><span class="pbg-cp-trk-del-val">' + Utils.sanitizeHTML(d.date || 'N/A') + '</span></div>' +
+                '<div class="pbg-cp-trk-del-row"><span class="pbg-cp-trk-del-lbl">Reason</span><span class="pbg-cp-trk-del-val">' + Utils.sanitizeHTML((d.reason || 'N/A').replace(/_/g, ' ')) + '</span></div>' +
+                (isDefect ? '<div class="pbg-cp-trk-del-row"><span class="pbg-cp-trk-del-lbl">Defect</span><span class="pbg-cp-trk-del-val defect">' + Utils.sanitizeHTML(d.defect.replace(/_/g, ' ')) + '</span></div>' : '') +
+                '<div class="pbg-cp-trk-del-row"><span class="pbg-cp-trk-del-lbl">Place Id</span><span class="pbg-cp-trk-del-val">' + Utils.sanitizeHTML(d.placeId || 'N/A') + '</span></div>' +
+                '<div class="pbg-cp-trk-del-row"><span class="pbg-cp-trk-del-lbl">Photo</span><span class="pbg-cp-trk-del-val ' + photoClass + '">' + photoText + '</span></div>' +
+              '</div>';
+          } else {
+            resultHTML = '<div class="pbg-cp-trk-result"><div style="font-size:9px;color:#687078;padding:1px 0;">No delivery found</div></div>';
+          }
+        }
+
+        return `<div class="pbg-cp-row pbg-cp-trk" style="align-items:flex-start">
+          <div class="pbg-cp-lbl" style="padding-top:2px">TrackingId</div>
+          <div style="flex:1;min-width:0">
+            <div class="pbg-cp-trk-val" style="margin-bottom:4px">${Utils.sanitizeHTML(tid)}</div>
+            <div class="pbg-cp-trk-btns">
+              <span class="pbg-cp-trk-btn search" data-tracking="${Utils.sanitizeHTML(tid)}" data-action="search">🔍 Search</span>
+              <span class="pbg-cp-trk-btn pod"    data-tracking="${Utils.sanitizeHTML(tid)}" data-action="pod">↗ POD</span>
+            </div>
+          </div>
+        </div>${resultHTML}`;
+      },
+
+      setupHandlers() {
+        if (!this.element) return;
+
+        // ── Drag to move ───────────────────────────────────────────────────────
+        const topbar = this.element.querySelector('.pbg-cp-topbar');
+        if (topbar) {
+          let dragStartX, dragStartY, startLeft, startTop, dragging = false;
+          topbar.addEventListener('mousedown', (e) => {
+            if (e.target.closest('.pbg-cp-topbar-btns')) return; // ignore button clicks
+            dragging = true;
+            dragStartX = e.clientX; dragStartY = e.clientY;
+            const rect = this.element.getBoundingClientRect();
+            startLeft = rect.left; startTop = rect.top;
+            this.element.classList.add('dragging');
+            e.preventDefault();
+          });
+          document.addEventListener('mousemove', (e) => {
+            if (!dragging) return;
+            const dx = e.clientX - dragStartX, dy = e.clientY - dragStartY;
+            const newLeft = Math.max(0, Math.min(window.innerWidth  - this.element.offsetWidth,  startLeft + dx));
+            const newTop  = Math.max(0, Math.min(window.innerHeight - this.element.offsetHeight, startTop  + dy));
+            this.element.style.left = newLeft + 'px';
+            this.element.style.top  = newTop  + 'px';
+          });
+          document.addEventListener('mouseup', () => {
+            if (dragging) {
+              dragging = false;
+              this.element.classList.remove('dragging');
+              this._userMoved = true; // remember user has manually positioned the panel
+            }
+          });
+        }
+
+        // TrackingId buttons
+        this.element.querySelectorAll('.pbg-cp-trk-btn').forEach(btn => {
+          btn.addEventListener('click', async (e) => {
+            e.preventDefault(); e.stopPropagation();
+            const t = btn.dataset.tracking;
+            if (!t) return;
+            if (btn.dataset.action === 'search') {
+              // Original behaviour: search in past deliveries panel
+              await PastDeliveriesHelper.searchTracking(t);
+            } else if (btn.dataset.action === 'pod') {
+              // New behaviour: open POD logistics page in new tab
+              openTrackingTab(t, false);
+            }
+          });
+        });
+
+        // Copy-on-click rows (ComId1, orderId1, ComId2, orderId2)
+        this.element.querySelectorAll('.pbg-cp-copy').forEach(row => {
+          row.addEventListener('click', async (e) => {
+            e.preventDefault(); e.stopPropagation();
+            const val = row.dataset.copy;
+            const valEl  = row.querySelector('.pbg-cp-copy-val');
+            if (val) {
+              try {
+                await navigator.clipboard.writeText(val);
+                const iconEl = row.querySelector('.pbg-cp-copy-icon');
+                const valEl  = row.querySelector('.pbg-cp-copy-val');
+                if (iconEl) { iconEl.textContent = '✓'; iconEl.style.color = '#1a7f37'; }
+                if (valEl)  { valEl.style.color = '#1a7f37'; }
+                setTimeout(() => {
+                  if (iconEl) { iconEl.textContent = '⎘'; iconEl.style.color = ''; }
+                  if (valEl)  { valEl.style.color = ''; }
+                }, 1200);
+              } catch (err) {}
+            }
+          });
+        });
+
+        // Minimize button
+        const minBtn = this.element.querySelector('[data-action="minimize"]');
+        if (minBtn) {
+          minBtn.addEventListener('click', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            this.isMinimized = !this.isMinimized;
+            this.element.classList.toggle('minimized', this.isMinimized);
+            minBtn.textContent = this.isMinimized ? '+' : '−';
+          });
+        }
+
+        // Size buttons — cycle through scale-sm (default) → normal → scale-lg
+        const SCALES = ['scale-sm', '', 'scale-lg'];
+        const shrinkBtn = this.element.querySelector('[data-action="shrink"]');
+        const growBtn   = this.element.querySelector('[data-action="grow"]');
+        const applyScale = (scale) => {
+          this.element.classList.remove('scale-sm', 'scale-lg');
+          if (scale) this.element.classList.add(scale);
+          this._scale = scale;
+        };
+        if (!this._scale) this._scale = '';
+        applyScale(this._scale);
+        if (shrinkBtn) shrinkBtn.addEventListener('click', (e) => {
+          e.preventDefault(); e.stopPropagation();
+          const idx = SCALES.indexOf(this._scale);
+          applyScale(SCALES[Math.max(0, idx - 1)]);
+        });
+        if (growBtn) growBtn.addEventListener('click', (e) => {
+          e.preventDefault(); e.stopPropagation();
+          const idx = SCALES.indexOf(this._scale);
+          applyScale(SCALES[Math.min(SCALES.length - 1, idx + 1)]);
+        });
+      },
+
+      show() {
+        if (this.element && !this.isSubmissionInProgress) {
+          this.positionPanel();
+          this.element.classList.remove("hidden");
+          this.isVisible = true;
+        }
+      },
+
+      hide() {
+        if (this.element) { this.element.classList.add("hidden"); this.isVisible = false; }
+        if (this.queueChangeNotification) { this.queueChangeNotification.remove(); this.queueChangeNotification = null; }
+        if (this.queueChangeTimeout) { clearTimeout(this.queueChangeTimeout); this.queueChangeTimeout = null; }
+      },
+
+      cleanup() {
+        if (this.modalObserver) { this.modalObserver.disconnect(); this.modalObserver = null; }
+        if (this.queueChangeNotification) { this.queueChangeNotification.remove(); this.queueChangeNotification = null; }
+        if (this.queueChangeTimeout) { clearTimeout(this.queueChangeTimeout); this.queueChangeTimeout = null; }
+        if (this.element) { this.element.remove(); this.element = null; }
+        this.isVisible = false; this.isMinimized = false; this.isSubmissionInProgress = false;
+      },
+    };
+
+    // ── Notification Manager ───────────────────────────────────────────────────
+    const NotificationManager = {
+      container: null, notifications: new Set(), notificationState: new Map(), isModalOpen: false,
+      init() {
+        if (this.container) return;
+        this.container = document.createElement("div"); this.container.className = "pbg-notif-wrap";
+        document.body.appendChild(this.container);
+      },
+      hideNotifications() { if (this.container) this.container.classList.add("hidden"); },
+      showNotifications() { if (this.container) this.container.classList.remove("hidden"); },
+      show(type, title, content, duration = CONFIG.NOTIFICATION_DURATION.CLASSIFIER) {
+        if (!this.container) this.init();
+        const key = type + "-" + title + "-" + content;
+        const now = Date.now();
+        if (this.notificationState.has(key) && now - this.notificationState.get(key) < CONFIG.MIN_NOTIFICATION_INTERVAL) return;
+        this.notificationState.set(key, now);
+        this.notifications.forEach(n => { if (n.dataset.type === type) { n.remove(); this.notifications.delete(n); } });
+        const n = document.createElement("div"); n.className = "pbg-notif " + type.toLowerCase(); n.dataset.type = type;
+        n.innerHTML = '<div class="pbg-notif-title">' + Utils.sanitizeHTML(title) + '</div><div class="pbg-notif-body">' + Utils.sanitizeHTML(content) + '</div>';
+        this.container.appendChild(n); this.notifications.add(n);
+        requestAnimationFrame(() => n.classList.add("show"));
+        setTimeout(() => { n.classList.remove("show"); setTimeout(() => { if (n.parentNode) { n.remove(); this.notifications.delete(n); } }, 300); }, duration);
+      },
+      showQueueAlert(alertType, taskTemplateId) {
+        if (!this.container) this.init();
+        let title, content, cls;
+        if (alertType === "SUGGESTED_GEOCODES") { title = "Suggested Geocodes Available"; content = "Queue: " + taskTemplateId + "\n\nPlease check the Suggested Geocodes before processing."; cls = "queue-alert"; }
+        else if (alertType === "POM_GEOCODE") { title = "POM Geocode Task"; content = "Queue: " + taskTemplateId + "\n\nThe current task has POM geocode."; cls = "pom-alert"; }
+        else return;
+        const n = document.createElement("div"); n.className = "pbg-notif " + cls; n.dataset.type = alertType;
+        n.innerHTML = '<div class="pbg-notif-title">' + title + '</div><div class="pbg-notif-body">' + Utils.sanitizeHTML(content) + '</div>';
+        this.container.appendChild(n); this.notifications.add(n);
+        requestAnimationFrame(() => n.classList.add("show"));
+        setTimeout(() => { n.classList.remove("show"); setTimeout(() => { if (n.parentNode) { n.remove(); this.notifications.delete(n); } }, 300); }, CONFIG.NOTIFICATION_DURATION.QUEUE_ALERT);
+      },
+      showModal(title, content, buttons, rightSide = false) {
+        return new Promise((resolve) => {
+          this.hideNotifications(); this.isModalOpen = true;
+          const o = document.createElement("div"); o.className = "pbg-mo";
+          const m = document.createElement("div"); m.className = rightSide ? "pbg-md rs" : "pbg-md";
+          const bHTML = buttons.map(b => '<button class="pbg-md-btn ' + (b.class || "primary") + '" data-action="' + b.action + '">' + b.text + '</button>').join("");
+          const cHTML = rightSide ? content : Utils.sanitizeHTML(content);
+          m.innerHTML = '<div class="pbg-md-t">' + Utils.sanitizeHTML(title) + '</div><div class="pbg-md-c">' + cHTML + '</div><div class="pbg-md-btns">' + bHTML + '</div>';
+          document.body.appendChild(o); document.body.appendChild(m);
+          const close = (action) => { o.remove(); m.remove(); this.isModalOpen = false; this.showNotifications(); resolve(action); };
+          m.querySelectorAll(".pbg-md-btn").forEach(b => b.addEventListener("click", () => close(b.dataset.action)));
+        });
+      },
+      async showGAMModal(caseInfo = null) {
+        let content = "Possible GAM issue identified. Please verify manually.";
+        if (caseInfo) {
+          content = "Possible GAM issue identified. Please verify manually.\n\nTaskTemplateId: " + (caseInfo.taskTemplateId || "N/A") + "\npbgEnabled: " + (caseInfo.pbgEnabled || "N/A");
+          if (caseInfo.pbgEnabled !== "true") content += "\n\nNote: This is NOT a PBG case. GAM validation shown for informational purposes only.";
+        }
+        return this.showModal("Possible GAM Issue Found", content, [
+          { text: "No Issue - Proceed", action: "proceed", class: "primary" },
+          { text: "Yes - GAM Issue", action: "stop", class: "danger" },
+        ], false);
+      },
+      async showClassificationModal(reason = "") {
+        const isNoCDP = reason.includes("No CDP information");
+        const msg = isNoCDP ? CONFIG.CLASSIFICATION.MESSAGES.NO_CDP_VERIFICATION : CONFIG.CLASSIFICATION.MESSAGES.VERIFICATION_NEEDED;
+        return this.showModal("Classification Verification Needed", msg, [
+          { text: "Confirm Unit Level", action: "unit", class: "primary" },
+          { text: "Confirm Address Level", action: "address", class: "secondary" },
+        ], isNoCDP);
+      },
+      clearAll() {
+        this.notifications.forEach(n => { if (n.parentNode) n.remove(); });
+        this.notifications.clear(); this.notificationState.clear();
+      },
+    };
+
+    // ── Selection Monitor ──────────────────────────────────────────────────────
+    const SelectionMonitor = {
+      element: null, expectedClassification: null,
+      start(c) { this.expectedClassification = c; this.create(); this.update(); },
+      create() { if (this.element) return; this.element = document.createElement("div"); this.element.className = "pbg-sm"; document.body.appendChild(this.element); },
+      update() {
+        if (!this.element || !this.expectedClassification) return;
+        const cur = DOMExtractor.getCurrentSelection();
+        const match = cur === this.expectedClassification.classification;
+        this.element.className = "pbg-sm " + (match ? "match" : "mismatch");
+        if (match) this.element.innerHTML = '<div class="sl">Correct Selection</div><div>' + this.expectedClassification.classification + '</div>';
+        else this.element.innerHTML = '<div class="sl">Selection Mismatch</div><div>Expected: ' + this.expectedClassification.classification + '</div><div>Selected: ' + cur + '</div>';
+      },
+      remove() { if (this.element) { this.element.remove(); this.element = null; } this.expectedClassification = null; },
+    };
+
+    // ── Unified Observer ───────────────────────────────────────────────────────
+    const UnifiedObserver = {
+      observer: null, debounceTimers: new Map(),
+      callbacks: { onAddressChange: [], onSelectionChange: [], onGeofenceChange: [] },
+      start() {
+        if (this.observer) return;
+        this.observer = new MutationObserver((mutations) => this.handleMutations(mutations));
+        this.observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["aria-checked", "checked", "value"] });
+      },
+      handleMutations(mutations) {
+        const c = { addressChanged: false, selectionChanged: false, geofenceChanged: false };
+        for (const m of mutations) {
+          if (m.target.textContent?.includes("Address ID:")) c.addressChanged = true;
+          if (m.type === "attributes" && (m.attributeName === "aria-checked" || m.attributeName === "checked")) c.selectionChanged = true;
+          if (m.target.id === "geofence" || m.target.id === "poly_geofence") c.geofenceChanged = true;
+        }
+        if (c.addressChanged) this.debounce("address", () => this.triggerCallbacks("onAddressChange"), CONFIG.DEBOUNCE_DELAY);
+        if (c.selectionChanged) this.debounce("selection", () => this.triggerCallbacks("onSelectionChange"), CONFIG.SELECTION_THROTTLE);
+        if (c.geofenceChanged) this.debounce("geofence", () => this.triggerCallbacks("onGeofenceChange"), 300);
+      },
+      debounce(key, cb, d) {
+        if (this.debounceTimers.has(key)) clearTimeout(this.debounceTimers.get(key));
+        this.debounceTimers.set(key, setTimeout(() => { cb(); this.debounceTimers.delete(key); }, d));
+      },
+      on(event, cb) { if (this.callbacks[event]) this.callbacks[event].push(cb); },
+      triggerCallbacks(event) { if (this.callbacks[event]) this.callbacks[event].forEach(cb => cb()); },
+      stop() { if (this.observer) { this.observer.disconnect(); this.observer = null; } },
+    };
+
+    // ── Case Processor ─────────────────────────────────────────────────────────
+    const CaseProcessor = {
+      currentAddressId: null,
+      processingState: {
+        caseDetailsExtracted: false, initialDataExtracted: false,
+        gamValidated: false, classified: false, queueAlertShown: false,
+        pastDeliveriesOpened: false,
+      },
+      lastTaskTemplateId: null, lastPbgEnabled: null,
+
+      isLiveCase() { return document.querySelector(DOM_SELECTORS.LIVE_CASE_INDICATOR) !== null; },
+
+      async processCase(addressId) {
+        if (addressId !== this.currentAddressId) this.reset(addressId);
+        if (!this.isLiveCase()) return;
+        try {
+          await this.extractCaseDetails();
+          const curTT = CaseDetailsManager.getCaseField("TaskTemplateId");
+          const pbg = CaseDetailsManager.getCaseField("pbgEnabled");
+          const isValid = curTT && curTT !== "EXTRACTION_FAILED" && curTT !== "N/A";
+          const changed = isValid && this.lastTaskTemplateId !== null && curTT !== this.lastTaskTemplateId;
+          const isFirst = isValid && this.lastTaskTemplateId === null;
+          const prevDec = this.lastTaskTemplateId ? this.lastTaskTemplateId + (this.lastPbgEnabled === "true" ? "_PID" : "") : null;
+          const curDec = isValid ? curTT + (pbg === "true" ? "_PID" : "") : null;
+
+          CaseDetailsPanel.update(CaseDetailsManager.caseData, changed, prevDec);
+          if (isFirst || changed) CaseDetailsPanel.showQueueChangeNotification(curDec, changed ? prevDec : null);
+          if (isValid) { this.lastTaskTemplateId = curTT; this.lastPbgEnabled = pbg; }
+
+          this.triggerPastDeliveries();
+          await this.checkQueueAlerts();
+          const gamPassed = await this.validateGAM();
+          if (!gamPassed) return;
+          if (CaseDetailsManager.getCaseField("pbgEnabled") !== "true") return;
+          await this.extractInitialData();
+          const result = await this.classify();
+          this.startMonitoring(result);
+        } catch (e) {
+          NotificationManager.show("ERROR", "Processing Error", "Failed to process case. Please refresh and try again.", CONFIG.NOTIFICATION_DURATION.ERROR);
+        }
+      },
+
+      async extractCaseDetails() {
+        if (this.processingState.caseDetailsExtracted) return;
+        await CaseDetailsManager.extractCaseDetails(this.currentAddressId);
+        this.processingState.caseDetailsExtracted = true;
+      },
+
+      triggerPastDeliveries() {
+        if (this.processingState.pastDeliveriesOpened) return;
+        this.processingState.pastDeliveriesOpened = true;
+        PastDeliveriesHelper.autoOpenAndSetFilters();
+      },
+
+      async checkQueueAlerts() {
+        if (this.processingState.queueAlertShown) return;
+        const tt = CaseDetailsManager.getCaseField("TaskTemplateId");
+        const sgDP = CaseDetailsManager.getCaseField("SuggestedGeocodesDP");
+        if (QueueDetector.shouldShowSuggestedGeocodesAlert(tt, sgDP)) { NotificationManager.showQueueAlert("SUGGESTED_GEOCODES", tt); this.processingState.queueAlertShown = true; return; }
+        if (QueueDetector.shouldShowPOMAlert(tt)) { NotificationManager.showQueueAlert("POM_GEOCODE", tt); this.processingState.queueAlertShown = true; return; }
+        this.processingState.queueAlertShown = true;
+      },
+
+      async validateGAM() {
+        if (this.processingState.gamValidated) return true;
+        const ad = DOMExtractor.extractAddressData();
+        if (!ad.unitAddress || !ad.customerAddress) { NotificationManager.show("ERROR", "GAM Validation", "Failed to extract addresses", CONFIG.NOTIFICATION_DURATION.GAM); return false; }
+        const comp = GAMValidator.validate(ad.unitAddress, ad.customerAddress);
+        if (comp.isMatch) {
+          NotificationManager.show("SUCCESS", "GAM Validation", "No GAM Issue - Addresses match correctly", CONFIG.NOTIFICATION_DURATION.GAM);
+          this.processingState.gamValidated = true;
+          await new Promise(r => setTimeout(r, 4500));
+          return true;
+        }
+        const ci = { taskTemplateId: CaseDetailsManager.getCaseField("TaskTemplateId") || "N/A", pbgEnabled: CaseDetailsManager.getCaseField("pbgEnabled") || "N/A" };
+        const action = await NotificationManager.showGAMModal(ci);
+        if (action === "proceed") { this.processingState.gamValidated = true; return true; }
+        NotificationManager.show("ERROR", "GAM Validation", "GAM Issue Confirmed - Please correct before proceeding", CONFIG.NOTIFICATION_DURATION.GAM);
+        return false;
+      },
+
+      async extractInitialData() {
+        if (this.processingState.initialDataExtracted) return;
+        CaseDetailsManager.extractInitialAddressData();
+        this.processingState.initialDataExtracted = true;
+      },
+
+      async classify() {
+        const { pdl, dh } = CaseDetailsManager.getInitialAddressData();
+        if (pdl === "EXTRACTION_FAILED" || dh === "EXTRACTION_FAILED") { NotificationManager.show("ERROR", "Classification Failed", "Unable to extract PDL or DH data. Please verify manually.", CONFIG.NOTIFICATION_DURATION.ERROR); return null; }
+        const result = ClassificationValidator.classify(pdl, dh);
+        if (result.needsVerification) {
+          const action = await NotificationManager.showClassificationModal(result.reason);
+          result.classification = action === "unit" ? "UNIT LEVEL" : "ADDRESS LEVEL";
+          result.needsVerification = false;
+          result.reason = "User verified as " + result.classification;
+        }
+        NotificationManager.show(
+          result.classification === "UNIT LEVEL" ? "SUCCESS" : "WARNING", "Classification",
+          "Case " + this.currentAddressId + "\nClassification: " + result.classification + "\nReason: " + result.reason,
+          CONFIG.NOTIFICATION_DURATION.CLASSIFIER
+        );
+        this.processingState.classified = true;
+        return result;
+      },
+
+      startMonitoring(result) { if (!result) return; SelectionMonitor.start(result); },
+
+      reset(addressId) {
+        this.currentAddressId = addressId;
+        this.processingState = {
+          caseDetailsExtracted: false, initialDataExtracted: false,
+          gamValidated: false, classified: false, queueAlertShown: false,
+          pastDeliveriesOpened: false,
+        };
+        CaseDetailsManager.clear(); DOMExtractor.clearCache();
+        NotificationManager.clearAll(); SelectionMonitor.remove();
+        PastDeliveriesHelper.clearHighlights();
+        CaseDetailsPanel._userMoved = false; // new case → reset to default position
+      },
+    };
+
+    // ── Initialize Main Page ───────────────────────────────────────────────────
+    function initialize() {
+      injectStyles();
+      NotificationManager.init();
+      CaseDetailsPanel.create();
+
+      UnifiedObserver.on("onAddressChange", async () => {
+        const aid = DOMExtractor.getAddressId();
+        if (aid && aid !== CaseProcessor.currentAddressId) await CaseProcessor.processCase(aid);
+      });
+
+      UnifiedObserver.on("onSelectionChange", () => {
+        if (CaseProcessor.processingState.classified) SelectionMonitor.update();
+      });
+
+      UnifiedObserver.on("onGeofenceChange", () => {
+        if (CaseDetailsManager.caseData) CaseDetailsPanel.update(CaseDetailsManager.caseData, false, null);
+      });
+
+      document.addEventListener("click", function (event) {
+        const submitBtn = event.target.closest(DOM_SELECTORS.SUBMIT_BUTTON);
+        if (submitBtn) {
+          CaseDetailsPanel.isSubmissionInProgress = true;
+          CaseDetailsPanel.hide();
+        }
+      });
+
+      document.addEventListener("keydown", (e) => {
+        if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable) return;
+        const key = e.key.toLowerCase();
+        if (key === "p") PastDeliveriesHelper.autoOpenAndSetFilters();
+        if (key === "t") {
+          const tid = CaseDetailsManager.getTrackingId();
+          if (tid) PastDeliveriesHelper.searchTracking(tid);
+        }
+      });
+
+      UnifiedObserver.start();
+
+      setTimeout(async () => {
+        const aid = DOMExtractor.getAddressId();
+        if (aid) await CaseProcessor.processCase(aid);
+      }, CONFIG.INITIAL_CASE_CHECK_DELAY);
+
+      window.addEventListener("beforeunload", () => {
+        UnifiedObserver.stop(); NotificationManager.clearAll();
+        SelectionMonitor.remove(); CaseDetailsPanel.cleanup();
+        PastDeliveriesHelper.clearHighlights();
+      });
+    }
+
+    initialize();
+
+  } // end IS_MAIN
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // SECTION 3 — IFRAME — POD/DFE/NEI + AutoAudit + GAM DP Triage Controller
+  //             (runs on templates.geostudio URLs inside the iframe)
+  // ══════════════════════════════════════════════════════════════════════════════
+  if (IS_IFRAME) {
+
+    // ── Generic dropdown selector (react-select style) ─────────────────────────
+    async function selectDropdownByText(fieldIdOrEl, optionText) {
+      let dropdown = null;
+      if (typeof fieldIdOrEl === 'string') {
+        dropdown = document.getElementById(fieldIdOrEl);
+      } else {
+        dropdown = fieldIdOrEl;
+      }
+      if (!dropdown) {
+        dropdown = Array.from(document.querySelectorAll('[id]')).find(e => (e.id || '').toLowerCase() === (fieldIdOrEl || '').toLowerCase());
+      }
+      if (!dropdown) return false;
+      dropdown.dispatchEvent(new Event('mousedown', { bubbles: true }));
+      await delay(150);
+      const listId = dropdown.getAttribute('aria-controls');
+      const list = listId ? document.getElementById(listId) : document.querySelector('[role="listbox"], [role="presentation"]');
+      if (!list) return false;
+      const opt = Array.from(list.querySelectorAll('[role="option"], li')).find(o => o.textContent.trim() === optionText);
+      if (opt) { opt.click(); await delay(200); return true; }
+      return false;
+    }
+
+    async function selectRadioByValue(value) {
+      const input = document.querySelector(`input[type="radio"][value="${value}"]`);
+      if (input) { input.scrollIntoView({ behavior: 'smooth', block: 'center' }); input.click(); await delay(120); return true; }
+      return false;
+    }
+
+    function createSmallButton(label, action, containerButtonsArr = []) {
+      const btn = document.createElement('button');
+      btn.textContent = label;
+      Object.assign(btn.style, {
+        padding: '6px 10px', backgroundColor: '#ccc', border: '2px solid #ccc',
+        borderRadius: '6px', fontSize: '13px', fontWeight: '700', cursor: 'pointer',
+        fontFamily: 'Amazon Ember, Arial, sans-serif', marginLeft: '8px'
+      });
+      btn.addEventListener('click', async () => {
+        containerButtonsArr.forEach(b => { b.style.backgroundColor = '#ccc'; b.style.color = '#000'; });
+        btn.style.backgroundColor = 'green'; btn.style.color = '#fff';
+        await delay(80);
+        try { await action(); } catch (e) { console.error(e); }
+      });
+      return btn;
+    }
+
+    // ── GAM Issue checkbox helpers ─────────────────────────────────────────────
+    async function selectGAMIssueYes() {
+      const checkbox = document.querySelector('div[role="checkbox"][data-testid="transfer-form-checkbox"]');
+      if (!checkbox) return false;
+      const isChecked = checkbox.getAttribute("aria-checked") === "true";
+      if (isChecked) return true;
+      checkbox.click(); await delay(120);
+      return true;
+    }
+
+    async function setupGAMIssueListener() {
+      const gamLabel = await waitFor(() =>
+        Array.from(document.querySelectorAll("p, span, div")).find(el => el.textContent.trim() === "GAMIssue"), 8000);
+      if (!gamLabel) return;
+      let container = gamLabel.closest("div") || gamLabel.parentElement;
+      if (!container) return;
+      const getOptions = () => Array.from(container.querySelectorAll(`
+        input[type="radio"],[role="radio"],[data-testid*="radio"],
+        button[role="radio"],div[role="radio"],span[role="radio"]`));
+      let options = getOptions();
+      if (options.length === 0) return;
+      const getCheckbox = () => document.querySelector('div[role="checkbox"][data-testid="transfer-form-checkbox"]');
+      function extractValue(opt) {
+        if (opt.value) return opt.value.trim();
+        if (opt.getAttribute("value")) return opt.getAttribute("value").trim();
+        return opt.textContent.trim();
+      }
+      function applyCheckboxState(value) {
+        const cb = getCheckbox(); if (!cb) return;
+        const checked = cb.getAttribute("aria-checked") === "true";
+        if (value === "Yes" && !checked) cb.click();
+        if ((value === "No" || value === "NA") && checked) cb.click();
+      }
+      options.forEach(opt => {
+        opt.addEventListener("click",   () => applyCheckboxState(extractValue(opt)));
+        opt.addEventListener("change",  () => applyCheckboxState(extractValue(opt)));
+      });
+    }
+
+    // ── GAMIssue → Auto Transfer (handled by GAM DP Triage Controller below) ──
+    // This stub exists for legacy call-site compatibility; real logic is in
+    // setupGamIssueListenersGAM() + handleGamIssueChange() further below.
+    function setupGAMIssueAutoTransfer() { /* no-op — superseded by GAM DP Triage Controller */ }
+
+
+
+    // ── NEI handler ────────────────────────────────────────────────────────────
+    async function handleNEI_main() {
+      showSimplePopup('NEI selected');
+      await selectDropdownByText('GAMIssue', 'NA');
+      await selectRadioByValue('No SDPP issue');
+      await selectDropdownByText('CDPType', 'NA');
+      await selectDropdownByText('GeocodeAccuracy', 'NEI');
+      await selectDropdownByText('SourceOfGeocodes', 'NA');
+      await selectDropdownByText('PODScanAccuracy', 'NO-POD');
+      await selectDropdownByText('ScanLocationAccuracy', 'Others(remarks)');
+      await selectDropdownByText('TranscriptAnalysis', 'NA');
+      showSimplePopup('NEI applied', 1200);
+    }
+
+    async function injectButtonsNearGeocode() {
+      let geocodeEl = document.getElementById('GeocodeAccuracy');
+      if (!geocodeEl) {
+        const labelNode = Array.from(document.querySelectorAll('p, span, label, div'))
+          .find(el => el.textContent?.trim() === 'Geocode Accuracy');
+        if (labelNode) geocodeEl = labelNode.closest('div')?.querySelector('[role="combobox"], [id*="Geocode"]') || null;
+      }
+      if (!geocodeEl || !geocodeEl.parentElement) return;
+      const buttons = [];
+      const neiBtn = createSmallButton('NEI', handleNEI_main, buttons);
+      buttons.push(neiBtn);
+      const wrapper = document.createElement('div');
+      wrapper.style.display = 'inline-flex'; wrapper.style.alignItems = 'center';
+      wrapper.appendChild(neiBtn);
+      geocodeEl.parentElement.appendChild(wrapper);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // GAM DP TRIAGE CONTROLLER (from GAMAutoFill-10K_user.js) — iframe context
+    // ══════════════════════════════════════════════════════════════════════════
+
+    let storedDPGeocode = null;
+    let currentSelectedQueue = null;
+    let currentGamIssueValue = null;
+    let isScriptClicking = false;
+    let transferLocked = false;
+
+    const DPRE_QUEUES = ['RDR_DPRE_PIPELINE_NA_PID','RDR_DPRE_PIPELINE_NA','RDR_DPRE_PIPELINE_NA_EG','RDR_DPRE_PIPELINE_POM'];
+    const PBG_QUEUES  = ['PBG_Hierarchy_Places_P0_L1','PBG_Hierarchy_Places_P2_L1'];
+
+    function calcDist(lat1, lon1, lat2, lon2) {
+      const R = 6371000;
+      const a = Math.sin((lat2-lat1)*Math.PI/180/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin((lon2-lon1)*Math.PI/180/2)**2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    }
+
+    function parseCoordinates(value) {
+      if (!value || typeof value !== 'string') return null;
+      const trimmed = value.trim();
+      if (!trimmed || !trimmed.includes(',')) return null;
+      try {
+        const [lat, lon] = trimmed.split(',').map(c => parseFloat(c.trim()));
+        if (isNaN(lat) || isNaN(lon)) return null;
+        if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
+        if (lat === 0 && lon === 0) return null;
+        return { lat, lon, original: trimmed };
+      } catch { return null; }
+    }
+
+    function isDpreQueue(q) { return q ? DPRE_QUEUES.some(dq => q.toUpperCase().includes(dq.toUpperCase())) : false; }
+    function isPbgQueue(q)  { return q ? PBG_QUEUES.some(pq => q.toUpperCase().includes(pq.toUpperCase()))  : false; }
+
+    function getGamIssueSection() {
+      for (const sec of document.querySelectorAll('.css-19hedjk')) {
+        const h = sec.querySelector('p.css-17xh5uu');
+        if (h && h.textContent.trim().toLowerCase().replace(/[_\s]/g, '') === 'gamissue') return sec;
+      }
+      return null;
+    }
+
+    function getCurrentGamIssueValue() {
+      const sec = getGamIssueSection(); if (!sec) return null;
+      for (const r of sec.querySelectorAll('input[type="radio"]')) {
+        if (r.checked || r.getAttribute('aria-checked') === 'true') return r.value;
+      }
+      return null;
+    }
+
+    function isGamIssueYes() { return getCurrentGamIssueValue() === 'Yes'; }
+    function isGamIssueNo()  { return getCurrentGamIssueValue() === 'No'; }
+
+    function getNativeDPField() {
+      return document.querySelector('input#suggestedDp:not(#geo-suggested-dp-input)') ||
+             document.querySelector('input[data-testid="suggestedDp"]:not(#geo-suggested-dp-input)');
+    }
+
+    function getCurrentSelectedQueue() {
+      const qs = document.querySelector('[data-testid="transfer-form-queue-selector"]');
+      if (qs) {
+        const v = qs.querySelector('[id*="-value"]') || qs.querySelector('.css-1h2ruwl');
+        if (v) { const t = v.textContent.trim(); return t && t !== 'Select...' && t !== 'Select a queue to transfer to' ? t : null; }
+      }
+      return null;
+    }
+
+    function isTransferEnabled() {
+      const cb = document.querySelector('[data-testid="transfer-form-checkbox"]');
+      return cb && cb.getAttribute('aria-checked') === 'true';
+    }
+
+    function disableGAMTransfer() {
+      if (isScriptClicking) return;
+      const cb = document.querySelector('[data-testid="transfer-form-checkbox"]');
+      if (cb && cb.getAttribute('aria-checked') === 'true') { isScriptClicking = true; cb.click(); isScriptClicking = false; }
+    }
+
+    function enableGAMTransfer() {
+      const cb = document.querySelector('[data-testid="transfer-form-checkbox"]');
+      if (cb && cb.getAttribute('aria-checked') === 'false') { isScriptClicking = true; cb.click(); isScriptClicking = false; }
+    }
+
+    // ── Single source-of-truth: apply UI lock state based on current flags ─────
+    // Call this AFTER setting transferLocked / upidTransferLocked to correct values.
+    function applyLockUI() {
+      const cb = document.querySelector('[data-testid="transfer-form-checkbox"]');
+      const qs = document.querySelector('[data-testid="transfer-form-queue-selector"]');
+      const locked = transferLocked || upidTransferLocked;
+
+      if (cb) { cb.style.opacity = locked ? '0.6' : '1'; cb.style.pointerEvents = locked ? 'none' : 'auto'; cb.style.cursor = locked ? 'not-allowed' : 'pointer'; }
+      if (qs) { qs.style.opacity = locked ? '0.6' : '1'; qs.style.pointerEvents = locked ? 'none' : 'auto'; qs.style.cursor = locked ? 'not-allowed' : 'pointer'; }
+
+      // GAM lock indicator
+      document.getElementById('geo-transfer-lock-indicator')?.remove();
+      if (transferLocked && qs?.parentElement && !document.getElementById('geo-transfer-lock-indicator')) {
+        const ind = document.createElement('div');
+        ind.id = 'geo-transfer-lock-indicator';
+        ind.innerHTML = '<div style="display:flex;align-items:center;gap:6px;margin-top:8px;padding:8px 12px;background:#fff3cd;border:1px solid #ffc107;border-radius:4px;font-size:12px;color:#856404;"><span>🔒 <strong>Locked:</strong> GAM Issue = Yes auto-selected PBG queue</span></div>';
+        qs.parentElement.appendChild(ind);
+      }
+
+      // UPID lock indicator
+      document.getElementById('upid-transfer-lock-indicator')?.remove();
+      if (upidTransferLocked && qs?.parentElement && !document.getElementById('upid-transfer-lock-indicator')) {
+        const ind = document.createElement('div');
+        ind.id = 'upid-transfer-lock-indicator';
+        ind.innerHTML = '<div style="display:flex;align-items:center;gap:6px;margin-top:8px;padding:8px 12px;background:#fff3cd;border:1px solid #ffc107;border-radius:4px;font-size:12px;color:#856404;"><span>🔒 <strong>Locked:</strong> Upid Geocode Accuracy = No auto-selected UPID queue</span></div>';
+        qs.parentElement.appendChild(ind);
+      }
+    }
+
+    function autoSelectPbgTransfer() {
+      // Set intent flags immediately
+      transferLocked = true;
+      upidTransferLocked = false;
+      // Remove UPID lock indicator right away, but DON'T apply GAM lock yet —
+      // we need the selector to be fully interactive for our script clicks.
+      document.getElementById('upid-transfer-lock-indicator')?.remove();
+      document.getElementById('geo-transfer-lock-indicator')?.remove();
+      const cb = document.querySelector('[data-testid="transfer-form-checkbox"]');
+      const qs = document.querySelector('[data-testid="transfer-form-queue-selector"]');
+      // Fully unlock UI for our clicks
+      if (cb) { cb.style.opacity = '1'; cb.style.pointerEvents = 'auto'; cb.style.cursor = 'pointer'; }
+      if (qs) { qs.style.opacity = '1'; qs.style.pointerEvents = 'auto'; qs.style.cursor = 'pointer'; }
+
+      enableGAMTransfer();
+      setTimeout(() => {
+        const selector = document.querySelector('[data-testid="transfer-form-queue-selector"]');
+        if (!selector) { applyLockUI(); return; }
+        // Use mousedown (React-select standard) to open the dropdown
+        isScriptClicking = true;
+        selector.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+        selector.dispatchEvent(new MouseEvent('click',     { bubbles: true, cancelable: true, view: window }));
+        isScriptClicking = false;
+        setTimeout(() => {
+          const options = document.querySelectorAll('[role="option"]');
+          let found = false;
+          for (const opt of options) {
+            const t = opt.textContent.trim();
+            if (t === 'PBG_Hierarchy_Places_P0_L1' || t === 'PBG_Hierarchy_Places_P2_L1') {
+              isScriptClicking = true; opt.click(); isScriptClicking = false;
+              currentSelectedQueue = t; found = true;
+              break;
+            }
+          }
+          // NOW apply the visual lock — queue is already changed
+          applyLockUI();
+          if (found) showGAMPopup('success', 'Auto-Selected', 'PBG queue auto-selected because <strong>GAM Issue = Yes</strong>.');
+          setTimeout(broadcastTransferState, 300);
+        }, 500);
+      }, 300);
+    }
+
+    function applyTransferLock() { applyLockUI(); } // legacy alias
+
+    function removeTransferLock() {
+      transferLocked = false;
+      applyLockUI();
+    }
+
+    // GAM styled popups
+    function injectGAMPopupStyles() {
+      if (document.getElementById('geo-popup-styles')) return;
+      const style = document.createElement('style');
+      style.id = 'geo-popup-styles';
+      style.textContent = `
+        @keyframes geo-slideIn{from{transform:translateX(110%);opacity:0}to{transform:translateX(0);opacity:1}}
+        @keyframes geo-slideOut{from{transform:translateX(0);opacity:1}to{transform:translateX(110%);opacity:0}}
+        .geo-popup{position:fixed!important;top:20px!important;right:20px!important;padding:16px!important;border-radius:8px!important;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif!important;font-size:14px!important;width:380px!important;max-width:90vw!important;box-shadow:0 5px 15px rgba(0,0,0,.15)!important;z-index:1000000!important;animation:geo-slideIn .4s ease!important;display:flex!important;align-items:flex-start!important;gap:12px!important}
+        .geo-popup-error{background:#fdecea!important;border-left:5px solid #d32f2f!important;color:#16191f!important}
+        .geo-popup-warning{background:#fffbe6!important;border-left:5px solid #ff9800!important;color:#16191f!important}
+        .geo-popup-success{background:#e8f5e9!important;border-left:5px solid #4caf50!important;color:#16191f!important}
+        .geo-popup-close{background:transparent;border:none;color:#555;font-size:22px;cursor:pointer;padding:0;line-height:1;opacity:.7}
+        .geo-popup-close:hover{opacity:1}
+      `;
+      document.head.appendChild(style);
+    }
+
+    function showGAMPopup(type, title, message) {
+      injectGAMPopupStyles();
+      document.querySelectorAll('.geo-popup').forEach(p => p.remove());
+      const icons = {
+        error:   `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#d32f2f" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`,
+        warning: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#ff9800" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`,
+        success: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#4caf50" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`,
+      };
+      const titleColors = { error:'#d32f2f', warning:'#c77700', success:'#2e7d32' };
+      const popup = document.createElement('div');
+      popup.className = `geo-popup geo-popup-${type}`;
+      popup.innerHTML = `<div style="flex-shrink:0;margin-top:2px;">${icons[type]||''}</div><div style="flex-grow:1;"><div style="display:flex;justify-content:space-between;margin-bottom:4px;"><span style="font-weight:700;color:${titleColors[type]||'#000'};font-size:16px;">${title}</span><button class="geo-popup-close">&times;</button></div><div style="line-height:1.5;">${message}</div></div>`;
+      document.body.appendChild(popup);
+      popup.querySelector('.geo-popup-close').addEventListener('click', () => {
+        popup.style.animation = 'geo-slideOut 0.4s ease forwards';
+        setTimeout(() => popup.remove(), 400);
+      });
+      setTimeout(() => { popup.style.animation = 'geo-slideOut 0.4s ease forwards'; setTimeout(() => popup.remove(), 400); }, 8000);
+    }
+
+    // Fallback DP field for DPRE validation
+    function createFallbackDPField() {
+      if (document.getElementById('geo-suggested-dp-container')) return document.getElementById('geo-suggested-dp-input');
+      const transferSection = document.querySelector('[data-testid="transfer-form-checkbox"]')?.closest('.css-1c02o5u') ||
+                              document.querySelector('[data-testid="transfer-form-checkbox"]')?.closest('.css-1d7jqjm')?.parentElement;
+      if (!transferSection) return null;
+      const container = document.createElement('div');
+      container.id = 'geo-suggested-dp-container';
+      container.innerHTML = `
+        <div style="margin-top:12px;padding:10px 14px;background:#f8f9fa;border:1px solid #dee2e6;border-radius:6px;">
+          <label style="display:block;font-weight:600;font-size:13px;margin-bottom:6px;color:#495057;">
+            Suggested DP Coordinates <span style="color:#d32f2f;">*</span>
+          </label>
+          <input id="geo-suggested-dp-input" type="text" placeholder="lat, lon (e.g. 37.7749, -122.4194)"
+            style="width:100%;padding:8px 10px;border:2px solid #dee2e6;border-radius:4px;font-size:13px;box-sizing:border-box;outline:none;" />
+          <div id="geo-dp-hint" style="font-size:12px;color:#6c757d;margin-top:4px;">Must be ≥10km from current DP geocode.</div>
+        </div>`;
+      transferSection.appendChild(container);
+      return document.getElementById('geo-suggested-dp-input');
+    }
+
+    function removeFallbackDPField() { document.getElementById('geo-suggested-dp-container')?.remove(); }
+
+    function getDPFieldValue() {
+      const native = getNativeDPField();
+      if (native?.value) return native.value.trim();
+      const fallback = document.getElementById('geo-suggested-dp-input');
+      return fallback?.value?.trim() || null;
+    }
+
+    function validateDPField() {
+      const dpValue = getDPFieldValue();
+      if (!dpValue) return { valid: false, error: 'No DP coordinate entered.' };
+      const coords = parseCoordinates(dpValue);
+      if (!coords) return { valid: false, error: 'Invalid coordinate format. Use: lat, lon' };
+      if (!storedDPGeocode) return { valid: true, coords };
+      const distance = calcDist(storedDPGeocode.lat, storedDPGeocode.lon, coords.lat, coords.lon);
+      const distanceKm = (distance / 1000).toFixed(2);
+      if (distance < 10000) return { valid: false, error: `Distance too small: ${distanceKm}km. Must be ≥10km from current DP.` };
+      const hint = document.getElementById('geo-dp-hint');
+      if (hint) { hint.style.color = '#4caf50'; hint.textContent = `Valid! Distance: ${distanceKm}km from current DP`; }
+      return { valid: true, coords, distance };
+    }
+
+    function filterQueueOptions() {
+      const optionsList = document.querySelector('[role="listbox"]') || document.querySelector('[id*="options-list"]');
+      if (!optionsList) return;
+      const gamYes = isGamIssueYes();
+      optionsList.querySelectorAll('[role="option"]').forEach(option => {
+        const t = option.textContent.trim();
+        // Only disable DPRE queues when GAM Issue = Yes (PBG blocker removed per user request)
+        const shouldDisable = gamYes && isDpreQueue(t);
+        option.style.opacity = shouldDisable ? '0.4' : '1';
+        option.style.pointerEvents = shouldDisable ? 'none' : 'auto';
+        option.style.cursor = shouldDisable ? 'not-allowed' : 'pointer';
+        option.style.backgroundColor = shouldDisable ? '#f0f0f0' : '';
+        option.style.textDecoration = shouldDisable ? 'line-through' : 'none';
+      });
+    }
+
+    function validateQueueSelection(selectedQueue) {
+      if (!selectedQueue) return true;
+      if (transferLocked && isPbgQueue(selectedQueue)) return true;
+      if (upidTransferLocked && selectedQueue === UPID_QUEUE) return true;
+      // Only block DPRE queues when GAM Issue = Yes
+      if (isGamIssueYes() && isDpreQueue(selectedQueue)) {
+        showGAMPopup('error','Queue Blocked','<strong>DPRE queues</strong> are not allowed when <strong>GAM Issue = Yes</strong>. Please select a PBG queue instead.');
+        return false;
+      }
+      // Removed: PBG blocker when GAM=No (per user request)
+      // Removed: distance deviation check for Suggested DP (per user request)
+      return true;
+    }
+
+    function handleQueueSelection(selectedQueue) {
+      if (currentSelectedQueue === selectedQueue) return;
+      currentSelectedQueue = selectedQueue;
+      if (!isDpreQueue(selectedQueue) || isGamIssueYes()) removeFallbackDPField();
+      const isValid = validateQueueSelection(selectedQueue);
+      if (!isValid) currentSelectedQueue = null;
+    }
+
+    function handleGamIssueChange(newValue) {
+      if (newValue === 'Yes') {
+        // GAM=Yes: highest priority. Kill UPID lock, take over with PBG.
+        upidTransferLocked = false;
+        removeFallbackDPField();
+        setTimeout(() => autoSelectPbgTransfer(), 100);
+      } else {
+        // GAM changed to No/NA: release GAM lock.
+        transferLocked = false;
+        // Check UPID — if UPID=No, hand off to UPID queue. Otherwise clear transfer.
+        const upidVal = getUpidGeocodeValue();
+        if (upidVal && upidVal.toLowerCase() === 'no') {
+          // UPID=No takes over now
+          setTimeout(() => autoSelectUpidQueue(), 100);
+        } else {
+          // Nothing active — uncheck transfer if it was on a PBG queue
+          upidTransferLocked = false;
+          applyLockUI();
+          const cq = getCurrentSelectedQueue();
+          if (cq && isPbgQueue(cq)) { disableGAMTransfer(); currentSelectedQueue = null; }
+        }
+      }
+      setTimeout(broadcastTransferState, 800);
+    }
+
+    function setupGamIssueListenersGAM() {
+      const sec = getGamIssueSection(); if (!sec) return;
+      sec.querySelectorAll('input[type="radio"]').forEach(radio => {
+        if (radio._geoListener) return; radio._geoListener = true;
+        radio.addEventListener('change', () => {
+          if (radio.checked) {
+            currentGamIssueValue = radio.value;
+            handleGamIssueChange(radio.value);
+            setTimeout(filterQueueOptions, 100);
+            if (!transferLocked) {
+              const cq = getCurrentSelectedQueue();
+              if (cq) { const isValid = validateQueueSelection(cq); if (!isValid) disableGAMTransfer(); }
+            }
+          }
+        });
+      });
+    }
+
+    function setupQueueSelectorListenersGAM() {
+      const qs = document.querySelector('[data-testid="transfer-form-queue-selector"]');
+      if (!qs || qs._geoListener) return; qs._geoListener = true;
+      qs.addEventListener('click', (e) => {
+        if (transferLocked && !isScriptClicking) { e.preventDefault(); e.stopPropagation(); showGAMPopup('warning','Transfer Locked','Transfer is locked because GAM Issue = Yes. Change GAM Issue to No to modify transfer settings.'); return; }
+        setTimeout(filterQueueOptions, 50); setTimeout(filterQueueOptions, 150);
+      });
+      new MutationObserver(() => {
+        if (isScriptClicking) return;
+        const cq = getCurrentSelectedQueue();
+        if (cq && cq !== currentSelectedQueue) handleQueueSelection(cq);
+      }).observe(qs, { childList: true, subtree: true, characterData: true });
+    }
+
+    function setupTransferCheckboxListenerGAM() {
+      const cb = document.querySelector('[data-testid="transfer-form-checkbox"]');
+      if (!cb || cb._geoListener) return; cb._geoListener = true;
+      cb.addEventListener('click', (e) => {
+        if (transferLocked && !isScriptClicking) {
+          e.preventDefault(); e.stopPropagation();
+          showGAMPopup('warning','Transfer Locked','Transfer is locked because GAM Issue = Yes. Change GAM Issue to No to modify transfer settings.');
+          return;
+        }
+        setTimeout(() => {
+          if (isTransferEnabled() && !transferLocked) {
+            const cq = getCurrentSelectedQueue();
+            if (cq) { const isValid = validateQueueSelection(cq); if (!isValid) disableGAMTransfer(); }
+          }
+        }, 100);
+      }, true);
+    }
+
+    function setupOptionClickListenerGAM() {
+      document.addEventListener('click', (e) => {
+        if (isScriptClicking) return;
+        const option = e.target.closest('[role="option"]');
+        if (!option) return;
+        const optionText = option.textContent.trim();
+        if (isDpreQueue(optionText) || isPbgQueue(optionText)) {
+          setTimeout(() => { const isValid = validateQueueSelection(optionText); if (!isValid) disableGAMTransfer(); }, 100);
+        }
+      }, true);
+    }
+
+    function setupIframeCommunication() {
+      window.addEventListener('message', (event) => {
+        if (event.data?.type === 'GEOSTUDIO_DP_GEOCODE') storedDPGeocode = event.data.data;
+      });
+      function requestDPGeocode() {
+        try { window.parent.postMessage({ type: 'REQUEST_DP_GEOCODE' }, '*'); } catch (e) {}
+      }
+      setTimeout(requestDPGeocode, 500);
+      setInterval(requestDPGeocode, 3000);
+    }
+
+    // Broadcast transfer-required state to parent (for submit button grey-out)
+    function broadcastTransferState() {
+      const gamYes  = isGamIssueYes();
+      const upidNo  = isUpidNo();
+      const needsTransfer = gamYes || upidNo;
+      const hasTransfer   = isTransferEnabled() && !!getCurrentSelectedQueue();
+      const required = needsTransfer && !hasTransfer;
+      let reason = '';
+      if (required) {
+        if (gamYes && upidNo)   reason = '⚠ GAM Issue = Yes & UPID = No: select transfer task before submitting';
+        else if (gamYes)        reason = '⚠ GAM Issue = Yes: select PBG transfer task before submitting';
+        else if (upidNo)        reason = '⚠ UPID Correction = No: select UPID transfer task before submitting';
+      }
+      try { window.parent.postMessage({ type: 'GEOSTUDIO_TRANSFER_REQUIRED', required, reason }, '*'); } catch (e) {}
+    }
+
+    function checkInitialGamState() {
+      const val = getCurrentGamIssueValue(); currentGamIssueValue = val;
+      if (val === 'Yes') setTimeout(() => autoSelectPbgTransfer(), 500);
+    }
+
+    function applyInitialQueueState() {
+      const gamVal  = getCurrentGamIssueValue();
+      const upidVal = getUpidGeocodeValue();
+      if (gamVal === 'Yes') {
+        upidTransferLocked = false;
+        autoSelectPbgTransfer();
+        return;
+      }
+      if (upidVal && upidVal.toLowerCase() === 'no') {
+        transferLocked = false;
+        autoSelectUpidQueue();
+        return;
+      }
+      transferLocked = false;
+      upidTransferLocked = false;
+      applyLockUI();
+      broadcastTransferState();
+    }
+
+    // Pre-warm the transfer queue dropdown so options are loaded into DOM
+    // before any auto-select fires. The queue selector only renders its option
+    // list after the transfer checkbox is enabled AND the dropdown is opened at
+    // least once. We simulate this silently on load.
+    function closeParentDialog() {
+      const findAndClickClose = () => {
+        const dialog = document.querySelector('div[role="dialog"][aria-modal="true"]');
+        if (dialog) {
+          const btn = dialog.querySelector('button[aria-label="Close"]') || dialog.querySelector('button.css-148awne');
+          if (btn) { btn.click(); return true; }
+        }
+        return false;
+      };
+      if (!findAndClickClose()) setTimeout(findAndClickClose, 200);
+    }
+
+    window.addEventListener('message', (event) => {
+      if (event.data?.type === 'GEOSTUDIO_CLOSE_DIALOG') closeParentDialog();
+    });
+
+    // ── UPID Geocode Accuracy → Auto-select RDR_COMBINED_UPID_TRIAGE ──────────
+    // When "Upid Geocode Accuracy" field has "Yes" selected (css-1prjt9m div)
+    // automatically enable transfer and select RDR_COMBINED_UPID_TRIAGE queue.
+    const UPID_QUEUE = 'RDR_COMBINED_UPID_TRIAGE';
+    let upidTransferLocked = false;
+
+    function getUpidGeocodeSection() {
+      const candidates = document.querySelectorAll('p.css-17xh5uu');
+      for (const lbl of candidates) {
+        const normalized = lbl.textContent.trim().toLowerCase().replace(/\s+/g, '');
+        if (normalized === 'upidgeocodeaccuracy') {
+          return lbl.closest('.css-19hedjk') || lbl.closest('div') || lbl.parentElement;
+        }
+      }
+      return null;
+    }
+
+    function getUpidGeocodeValue() {
+      const sec = getUpidGeocodeSection();
+      if (!sec) return null;
+      // Primary: selected div has class css-1prjt9m
+      const selected = sec.querySelector('div.css-1prjt9m');
+      if (selected) return selected.textContent.trim();
+      // Fallback: checked radio input
+      for (const r of sec.querySelectorAll('input[type="radio"]')) {
+        if (r.checked) return r.value.trim();
+      }
+      // Fallback: aria-checked
+      for (const el of sec.querySelectorAll('[role="radio"]')) {
+        if (el.getAttribute('aria-checked') === 'true') return el.textContent.trim();
+      }
+      return null;
+    }
+
+    function isUpidNo() {
+      const v = getUpidGeocodeValue();
+      return v && v.toLowerCase() === 'no';
+    }
+
+    function applyUpidTransferLock() { applyLockUI(); } // legacy alias — state already set
+
+    function removeUpidTransferLock() {
+      upidTransferLocked = false;
+      applyLockUI();
+    }
+
+    function autoSelectUpidQueue() {
+      // Set intent flags immediately
+      transferLocked = false;
+      upidTransferLocked = true;
+      // Remove GAM lock indicator right away, but DON'T apply UPID lock yet —
+      // we need the selector to be fully interactive for our script clicks.
+      document.getElementById('geo-transfer-lock-indicator')?.remove();
+      document.getElementById('upid-transfer-lock-indicator')?.remove();
+      const cb = document.querySelector('[data-testid="transfer-form-checkbox"]');
+      const qs = document.querySelector('[data-testid="transfer-form-queue-selector"]');
+      // Fully unlock UI for our clicks
+      if (cb) { cb.style.opacity = '1'; cb.style.pointerEvents = 'auto'; cb.style.cursor = 'pointer'; }
+      if (qs) { qs.style.opacity = '1'; qs.style.pointerEvents = 'auto'; qs.style.cursor = 'pointer'; }
+
+      enableGAMTransfer();
+      setTimeout(() => {
+        const selector = document.querySelector('[data-testid="transfer-form-queue-selector"]');
+        if (!selector) { applyLockUI(); return; }
+        isScriptClicking = true;
+        selector.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+        selector.dispatchEvent(new MouseEvent('click',     { bubbles: true, cancelable: true, view: window }));
+        isScriptClicking = false;
+        setTimeout(() => {
+          const options = document.querySelectorAll('[role="option"]');
+          let found = false;
+          for (const opt of options) {
+            if (opt.textContent.trim() === UPID_QUEUE) {
+              isScriptClicking = true; opt.click(); isScriptClicking = false;
+              currentSelectedQueue = UPID_QUEUE; found = true;
+              break;
+            }
+          }
+          // NOW apply the visual lock — queue is already changed
+          applyLockUI();
+          if (found) showGAMPopup('success', 'UPID Queue Auto-Selected',
+            `<strong>${UPID_QUEUE}</strong> auto-selected because <strong>Upid Geocode Accuracy = No</strong>.`);
+          setTimeout(broadcastTransferState, 300);
+        }, 500);
+      }, 300);
+    }
+
+    function handleUpidChange(value) {
+      // GAM=Yes always has priority — UPID must not override it
+      if (isGamIssueYes()) {
+        upidTransferLocked = false;
+        // Don't touch transferLocked or the UI — GAM is in control
+        return;
+      }
+      if (value && value.toLowerCase() === 'no') {
+        // UPID=No: take over with UPID queue
+        setTimeout(() => autoSelectUpidQueue(), 100);
+      } else {
+        // UPID changed away from No: release UPID lock, clear transfer if it was UPID queue
+        upidTransferLocked = false;
+        applyLockUI();
+        const cq = getCurrentSelectedQueue();
+        if (cq === UPID_QUEUE) { disableGAMTransfer(); currentSelectedQueue = null; }
+      }
+      setTimeout(broadcastTransferState, 800);
+    }
+
+    function setupUpidGeocodeListener() {
+      const sec = getUpidGeocodeSection();
+      if (!sec || sec._upidListener) return;
+      sec._upidListener = true;
+
+      // Watch for radio input change
+      sec.querySelectorAll('input[type="radio"]').forEach(r => {
+        if (r._upidBound) return; r._upidBound = true;
+        r.addEventListener('change', () => { if (r.checked) handleUpidChange(r.value); });
+      });
+
+      // Single click listener on whole section — covers div-based option UIs
+      sec.addEventListener('click', () => {
+        setTimeout(() => handleUpidChange(getUpidGeocodeValue() || ''), 100);
+      });
+
+      // MutationObserver: catches React class-toggle selection changes
+      new MutationObserver(() => {
+        if (isGamIssueYes()) return; // GAM = Yes always has priority — don't react to UPID changes
+        if (isUpidNo() && !upidTransferLocked) handleUpidChange('no');
+        else if (!isUpidNo() && upidTransferLocked) handleUpidChange('other');
+      }).observe(sec, { attributes: true, subtree: true, attributeFilter: ['class', 'aria-checked'] });
+    }
+
+    // ── Initialize Iframe features ─────────────────────────────────────────────
+    (async function initIframe() {
+      await delay(600);
+
+      // NEI button (non-blocking)
+      injectButtonsNearGeocode();
+
+      // GAM Issue auto-checkbox
+      setupGAMIssueAutoTransfer();
+
+      // GAM DP Triage controller
+      setupIframeCommunication();
+      setupGamIssueListenersGAM();
+      setupQueueSelectorListenersGAM();
+      setupOptionClickListenerGAM();
+      setupTransferCheckboxListenerGAM();
+
+      // smartPreWarm: waits for transfer form to appear, loads queue options, applies state
+      (async function smartPreWarm() {
+        for (let attempt = 0; attempt < 25; attempt++) {
+          const checkbox = document.querySelector('[data-testid="transfer-form-checkbox"]');
+          const selector = document.querySelector('[data-testid="transfer-form-queue-selector"]');
+          if (checkbox && selector) {
+            const wasEnabled = checkbox.getAttribute('aria-checked') === 'true';
+            if (!wasEnabled) { isScriptClicking = true; checkbox.click(); isScriptClicking = false; await delay(300); }
+            selector.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+            await delay(400);
+            document.body.click();
+            await delay(150);
+            if (!wasEnabled && !transferLocked && !upidTransferLocked) {
+              isScriptClicking = true; checkbox.click(); isScriptClicking = false;
+            }
+            setupUpidGeocodeListener();
+            applyInitialQueueState();
+            return;
+          }
+          await delay(400);
+        }
+      })();
+
+      // Periodic re-setup for dynamic DOM
+      setInterval(() => {
+        setupGamIssueListenersGAM();
+        setupQueueSelectorListenersGAM();
+        setupTransferCheckboxListenerGAM();
+        setupUpidGeocodeListener();
+        broadcastTransferState();
+        if (!transferLocked) {
+          const cq = getCurrentSelectedQueue();
+          if (cq && cq !== currentSelectedQueue) handleQueueSelection(cq);
+        }
+      }, 2000);
+
+      // MutationObserver — re-attaches listeners when new form elements appear
+      new MutationObserver((mutations) => {
+        let shouldSetup = false;
+        for (const m of mutations) {
+          if (m.type === 'childList') {
+            for (const node of m.addedNodes) {
+              if (node.nodeType === Node.ELEMENT_NODE &&
+                  (node.querySelector?.('[data-testid="transfer-form-queue-selector"]') ||
+                   node.querySelector?.('.css-17xh5uu') ||
+                   node.matches?.('[role="listbox"]'))) {
+                shouldSetup = true; break;
+              }
+            }
+          }
+          if (shouldSetup) break;
+        }
+        if (shouldSetup) {
+          setupGamIssueListenersGAM();
+          setupQueueSelectorListenersGAM();
+          setupTransferCheckboxListenerGAM();
+          setupUpidGeocodeListener();
+          setTimeout(filterQueueOptions, 100);
+        }
+      }).observe(document.body, { childList: true, subtree: true });
+
+      console.log('GeoStudio Combined V12.1 — iframe initialized');
+    })();
+
+  } // end IS_IFRAME
+
+  // ── Main page: broadcast DP geocode to iframes (from GAMAutoFill) ─────────────
+  if (IS_MAIN) {
+    let _currentAddressId = null;
+    let _currentDPGeocode = null;
+
+    function _getAddressId() {
+      try {
+        const el = document.evaluate("//p[text()='Address ID:']/following-sibling::a/p", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+        return el ? el.textContent.trim() : null;
+      } catch { return null; }
+    }
+
+    function _parseCoordinates(value) {
+      if (!value || typeof value !== 'string' || !value.includes(',')) return null;
+      try {
+        const [lat, lon] = value.split(',').map(c => parseFloat(c.trim()));
+        if (isNaN(lat) || isNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180 || (lat === 0 && lon === 0)) return null;
+        return { lat, lon, original: value.trim() };
+      } catch { return null; }
+    }
+
+    function _broadcastDPToIframes(coords) {
+      document.querySelectorAll('iframe').forEach(iframe => {
+        try { iframe.contentWindow.postMessage({ type: 'GEOSTUDIO_DP_GEOCODE', data: coords }, '*'); } catch (e) {}
+      });
+    }
+
+    function _captureInitialDPGeocode(addressId) {
+      if (!addressId) return;
+      const dpEl = document.querySelector('input#input-dp-geocode');
+      if (!dpEl || !dpEl.value) { setTimeout(() => _captureInitialDPGeocode(addressId), 1000); return; }
+      const coords = _parseCoordinates(dpEl.value);
+      if (coords) { _currentDPGeocode = coords; _broadcastDPToIframes(coords); }
+    }
+
+    window.addEventListener('message', (event) => {
+      if (event.data?.type === 'REQUEST_DP_GEOCODE') {
+        if (_currentDPGeocode) event.source.postMessage({ type: 'GEOSTUDIO_DP_GEOCODE', data: _currentDPGeocode }, '*');
+      }
+      // Submit grey-out: iframe sends transfer requirement state
+      if (event.data?.type === 'GEOSTUDIO_TRANSFER_REQUIRED') {
+        _handleTransferRequiredState(event.data.required, event.data.reason);
+      }
+    });
+
+    let _transferRequired = false;
+    let _transferReason = '';
+    let _submitStyle = null;
+
+    function _getSubmitBtn() {
+      return document.querySelector('#submit-btn') ||
+             document.querySelector('button[aria-controls="submit"]');
+    }
+
+    function _handleTransferRequiredState(required, reason) {
+      // Normalise reason — never let it be undefined/null
+      const newReason = reason || _transferReason || 'Select a transfer task before submitting';
+      // Only update the banner text if something actually changed
+      const stateChanged  = required !== _transferRequired;
+      const reasonChanged = newReason !== _transferReason;
+      _transferRequired = required;
+      if (required) _transferReason = newReason;
+
+      const btn = _getSubmitBtn();
+      if (!btn) return;
+      if (required) {
+        if (!_submitStyle) {
+          _submitStyle = { opacity: btn.style.opacity, cursor: btn.style.cursor, pointerEvents: btn.style.pointerEvents, title: btn.title };
+        }
+        btn.style.opacity = '0.4';
+        btn.style.cursor = 'not-allowed';
+        btn.style.pointerEvents = 'none';
+        btn.title = newReason;
+
+        const existing = document.getElementById('pbg-submit-warning');
+        if (!existing) {
+          const w = document.createElement('div');
+          w.id = 'pbg-submit-warning';
+          w.style.cssText = 'position:fixed;top:20px;right:20px;background:#d32f2f;color:#fff;padding:16px;border-radius:8px;font-size:14px;font-weight:600;z-index:9999;box-shadow:0 5px 15px rgba(0,0,0,0.15);max-width:380px;line-height:1.5;display:flex;align-items:flex-start;gap:12px;border-left:5px solid #b71c1c;';
+          w.innerHTML = `<div style="flex-shrink:0;margin-top:2px;"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div><div style="flex-grow:1;"><div style="font-size:16px;font-weight:700;margin-bottom:4px;">Transfer Required</div><div id="pbg-submit-warning-msg" style="font-size:13px;font-weight:400;opacity:0.95;">${newReason}</div></div>`;
+          document.body.appendChild(w);
+        } else if (reasonChanged) {
+          // Only update the message text when the reason actually changes
+          const msgEl = document.getElementById('pbg-submit-warning-msg');
+          if (msgEl) msgEl.textContent = newReason;
+        }
+      } else {
+        _transferReason = '';
+        if (_submitStyle) {
+          btn.style.opacity      = _submitStyle.opacity      || '';
+          btn.style.cursor       = _submitStyle.cursor       || '';
+          btn.style.pointerEvents = _submitStyle.pointerEvents || '';
+          btn.title              = _submitStyle.title        || '';
+          _submitStyle = null;
+        }
+        document.getElementById('pbg-submit-warning')?.remove();
+      }
+    }
+
+    // Poll for submit button existence and re-apply state when it appears
+    setInterval(() => {
+      if (_transferRequired) _handleTransferRequiredState(true, _transferReason);
+    }, 1000);
+
+    new MutationObserver(() => {
+      const newId = _getAddressId();
+      if (newId && newId !== _currentAddressId) {
+        _currentAddressId = newId; _currentDPGeocode = null;
+        setTimeout(() => _captureInitialDPGeocode(newId), 500);
+      }
+    }).observe(document.body, { childList: true, subtree: true });
+
+    const initId = _getAddressId();
+    if (initId) { _currentAddressId = initId; setTimeout(() => _captureInitialDPGeocode(initId), 500); }
+  }
+
+})();

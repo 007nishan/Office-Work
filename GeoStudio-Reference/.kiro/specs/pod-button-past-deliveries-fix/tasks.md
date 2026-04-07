@@ -1,0 +1,122 @@
+# Implementation Plan
+
+- [ ] 1. Write bug condition exploration test
+  - **Property 1: Fault Condition** - Panel Closed POD Button Failure
+  - **CRITICAL**: This test MUST FAIL on unfixed code - failure confirms the bug exists
+  - **DO NOT attempt to fix the test or the code when it fails**
+  - **NOTE**: This test encodes the expected behavior - it will validate the fix when it passes after implementation
+  - **GOAL**: Surface counterexamples that demonstrate the bug exists
+  - **Scoped PBT Approach**: Scope the property to concrete failing cases: POD button clicked with panel closed and valid tracking ID
+  - Test that clicking POD button with tracking ID "TBA123456789" while Past Deliveries panel is closed results in error message "⚠️ Could not find delivery button. Open Past Deliveries panel."
+  - Test that clicking POD button with tracking ID "TBA987654321" while Past Deliveries panel is closed results in the same error
+  - Test that `isBugCondition(input)` returns true when `input.podButtonClicked = true AND input.panelOpen = false AND input.trackingId` is valid
+  - Run test on UNFIXED code
+  - **EXPECTED OUTCOME**: Test FAILS (this is correct - it proves the bug exists)
+  - Document counterexamples found: error messages displayed, delivery rows not found in DOM, no attempt to open panel
+  - Mark task complete when test is written, run, and failure is documented
+  - _Requirements: 1.1, 1.2, 1.3_
+
+- [ ] 2. Write preservation property tests (BEFORE implementing fix)
+  - **Property 2: Preservation** - Panel Already Open Behavior
+  - **IMPORTANT**: Follow observation-first methodology
+  - Observe behavior on UNFIXED code for non-buggy inputs (panel already open)
+  - Test Case 1: Observe that POD button with tracking ID "TBA123456789" works correctly when panel is already open (finds tracking ID, clicks button, highlights marker)
+  - Test Case 2: Observe that tracking ID is highlighted in yellow on the page
+  - Test Case 3: Observe that camera button is found and clicked to open POD image
+  - Test Case 4: Observe that map marker is highlighted in Neon Orange (#FF6600) with stroke, fill, and drop-shadow
+  - Test Case 5: Observe that 800ms wait occurs before map marker highlighting
+  - Test Case 6: Observe that smooth scroll behavior works for map marker
+  - Test Case 7: Observe that invalid tracking IDs (N/A, '-', empty) return early without processing
+  - Write property-based tests capturing observed behavior patterns from Preservation Requirements
+  - Property-based testing generates many test cases for stronger guarantees
+  - Run tests on UNFIXED code
+  - **EXPECTED OUTCOME**: Tests PASS (this confirms baseline behavior to preserve)
+  - Mark task complete when tests are written, run, and passing on unfixed code
+  - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8_
+
+- [ ] 3. Fix for POD button Past Deliveries panel opening
+
+  - [x] 3.1 Implement helper function `isPastDeliveriesPanelOpen()`
+    - Check for presence of delivery rows in the DOM using selector: `tr, div[class*="row"], div[class*="item"], div[class*="delivery"]`
+    - Return true if rows.length > 10 (threshold to distinguish from other page elements)
+    - Return false otherwise
+    - Add console logging for debugging
+    - _Bug_Condition: isBugCondition(input) where input.panelOpen = false_
+    - _Expected_Behavior: Function correctly detects panel state_
+    - _Preservation: Does not affect existing search logic_
+    - _Requirements: 2.1_
+
+  - [x] 3.2 Implement helper function `openPastDeliveriesPanel()`
+    - Find "Past deliveries" button using selector: `p.css-1oqpb4x` with text content "Past deliveries"
+    - Scroll button into view using `scrollIntoView({ behavior: "smooth", block: "center" })`
+    - Click the button to open the panel
+    - Return true if button found and clicked, false otherwise
+    - Add console logging for success/failure
+    - _Bug_Condition: isBugCondition(input) where input.panelOpen = false_
+    - _Expected_Behavior: Function programmatically opens the panel_
+    - _Preservation: Does not affect existing behavior when panel is already open_
+    - _Requirements: 2.2_
+
+  - [x] 3.3 Implement helper function `waitForPanelContent()`
+    - Use polling mechanism with maximum wait time of 5000ms
+    - Check every 200ms if delivery rows have appeared in the DOM using `isPastDeliveriesPanelOpen()`
+    - Return true if rows appear within timeout, false otherwise
+    - Add console logging for load success/timeout
+    - _Bug_Condition: isBugCondition(input) where deliveryRowsNotFoundInDOM()_
+    - _Expected_Behavior: Function waits for panel content to load before proceeding_
+    - _Preservation: Does not affect existing behavior when panel is already open_
+    - _Requirements: 2.3_
+
+  - [x] 3.4 Integrate panel opening logic into `highlightDeliveryPointOnMap`
+    - Add panel state check at the start of the function (after invalid tracking ID check)
+    - If panel is not open, call `openPastDeliveriesPanel()`
+    - If opening fails, display error "⚠️ Could not find Past Deliveries button." and return
+    - If opening succeeds, call `waitForPanelContent()`
+    - If content loading fails, display error "⚠️ Past Deliveries panel opened but content did not load." and return
+    - If panel is already open, log "✓ Past Deliveries panel is already open" and proceed
+    - Proceed with existing search logic after panel is confirmed open
+    - _Bug_Condition: isBugCondition(input) where input.podButtonClicked = true AND input.panelOpen = false_
+    - _Expected_Behavior: Panel opens automatically before search, content loads, tracking ID is found_
+    - _Preservation: When panel is already open, no panel opening occurs, existing search logic runs immediately_
+    - _Requirements: 2.1, 2.2, 2.3, 2.4, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8_
+
+  - [x] 3.5 Add error handling for failure scenarios
+    - Panel button not found: "⚠️ Could not find Past Deliveries button."
+    - Panel content failed to load: "⚠️ Past Deliveries panel opened but content did not load."
+    - Tracking ID not found after panel is open: "⚠️ Could not find delivery button for tracking ID."
+    - Use existing `showPopup()` function for error messages with 3000ms duration
+    - _Bug_Condition: Edge cases where panel opening or content loading fails_
+    - _Expected_Behavior: Clear error messages guide user on what went wrong_
+    - _Preservation: Existing error handling for invalid tracking IDs remains unchanged_
+    - _Requirements: 2.4_
+
+  - [x] 3.6 Verify bug condition exploration test now passes
+    - **Property 1: Expected Behavior** - Panel Opens Automatically
+    - **IMPORTANT**: Re-run the SAME test from task 1 - do NOT write a new test
+    - The test from task 1 encodes the expected behavior
+    - When this test passes, it confirms the expected behavior is satisfied
+    - Run bug condition exploration test from step 1
+    - Verify that clicking POD button with panel closed now opens the panel automatically
+    - Verify that tracking ID is found after panel opens
+    - Verify that delivery button is clicked and map marker is highlighted
+    - **EXPECTED OUTCOME**: Test PASSES (confirms bug is fixed)
+    - _Requirements: 2.1, 2.2, 2.3, 2.4_
+
+  - [x] 3.7 Verify preservation tests still pass
+    - **Property 2: Preservation** - Panel Already Open Behavior Unchanged
+    - **IMPORTANT**: Re-run the SAME tests from task 2 - do NOT write new tests
+    - Run preservation property tests from step 2
+    - Verify that when panel is already open, no panel opening logic is triggered
+    - Verify that tracking ID highlighting, camera button clicking, and map marker highlighting all work exactly as before
+    - Verify that 800ms wait and smooth scroll behavior are unchanged
+    - Verify that invalid tracking ID early return is unchanged
+    - **EXPECTED OUTCOME**: Tests PASS (confirms no regressions)
+    - Confirm all tests still pass after fix (no regressions)
+    - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8_
+
+- [x] 4. Checkpoint - Ensure all tests pass
+  - Run all exploration tests and verify they pass (bug is fixed)
+  - Run all preservation tests and verify they pass (no regressions)
+  - Test edge cases: panel button not found, content load timeout, tracking ID not found
+  - Test multiple consecutive POD button clicks with different tracking IDs
+  - Ensure all tests pass, ask the user if questions arise

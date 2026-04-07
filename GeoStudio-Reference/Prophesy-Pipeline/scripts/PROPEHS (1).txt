@@ -1,0 +1,1144 @@
+// ==UserScript==
+// @name         PROPHESY FINAL v8 FULL PARITY ENTERPRISE
+// @namespace    http://tampermonkey.net/
+// @version      8.0
+// @author       @rohanjit + imtalif@
+// @description  DFE/NEI autofill + Auto AuditCode (iframe) + POD panel with dual Tracking buttons + Past Deliveries auto-open + auto POD Search after load + field aliases + PrevAuditDate
+// @match        https://na.templates.geostudio.last-mile.amazon.dev/*
+// @match        https://eu.templates.geostudio.last-mile.amazon.dev/*
+// @match        https://fe.templates.geostudio.last-mile.amazon.dev/*
+// @match        https://na.geostudio.last-mile.amazon.dev/*
+// @match        https://eu.geostudio.last-mile.amazon.dev/*
+// @grant        none
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    /* ═══════════════════════════════════════════════
+       SECTION 0 — IFRAME DETECTION + SHARED UTILS
+    ═══════════════════════════════════════════════ */
+    const IS_IFRAME    = window.self !== window.top;
+    const ENABLE_DFE_NEI  = IS_IFRAME;
+    const ENABLE_AUTO_AUDIT = IS_IFRAME;
+    const ENABLE_POD_PANEL  = !IS_IFRAME;  // main window only
+
+    function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+    async function waitFor(selectorOrFn, timeout = 10000, interval = 200) {
+        const start = Date.now();
+        while (Date.now() - start < timeout) {
+            try {
+                const el = typeof selectorOrFn === 'function'
+                    ? selectorOrFn()
+                    : document.querySelector(selectorOrFn);
+                if (el) return el;
+            } catch (e) {}
+            await delay(interval);
+        }
+        return null;
+    }
+
+    function showPopup(message, t = 1600) {
+        const popup = document.createElement('div');
+        popup.textContent = message;
+        Object.assign(popup.style, {
+            position: 'fixed', top: '12px', right: '12px',
+            padding: '10px 18px',
+            backgroundColor: 'rgba(0,0,0,0.85)', color: '#fff',
+            borderRadius: '8px', fontFamily: 'Amazon Ember, Arial, sans-serif',
+            zIndex: 99999, pointerEvents: 'none', maxWidth: '340px',
+            fontSize: '13px', lineHeight: '1.5'
+        });
+        document.body.appendChild(popup);
+        setTimeout(() => popup.remove(), t);
+    }
+
+    async function selectDropdownByText(fieldIdOrEl, optionText) {
+        let dropdown = typeof fieldIdOrEl === 'string'
+            ? (document.getElementById(fieldIdOrEl) ||
+               Array.from(document.querySelectorAll('[id]')).find(e => (e.id || '').toLowerCase() === fieldIdOrEl.toLowerCase()))
+            : fieldIdOrEl;
+        if (!dropdown) return false;
+        dropdown.dispatchEvent(new Event('mousedown', { bubbles: true }));
+        await delay(150);
+        const listId = dropdown.getAttribute('aria-controls');
+        const list = listId
+            ? document.getElementById(listId)
+            : document.querySelector('[role="listbox"], [role="presentation"]');
+        if (!list) return false;
+        const opt = Array.from(list.querySelectorAll('[role="option"], li'))
+            .find(o => o.textContent.trim() === optionText);
+        if (opt) { opt.click(); await delay(200); return true; }
+        return false;
+    }
+
+    async function selectRadioByValue(value) {
+        const input = document.querySelector(`input[type="radio"][value="${value}"]`);
+        if (input) {
+            input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            input.click();
+            await delay(120);
+            return true;
+        }
+        return false;
+    }
+
+    function createSmallButton(label, action, containerButtonsArr = []) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        Object.assign(btn.style, {
+            padding: '6px 10px', backgroundColor: '#ccc',
+            border: '2px solid #ccc', borderRadius: '6px',
+            fontSize: '13px', fontWeight: '700', cursor: 'pointer',
+            fontFamily: 'Amazon Ember, Arial, sans-serif', marginLeft: '8px'
+        });
+        btn.addEventListener('click', async () => {
+            containerButtonsArr.forEach(b => { b.style.backgroundColor = '#ccc'; b.style.color = '#000'; });
+            btn.style.backgroundColor = 'green';
+            btn.style.color = '#fff';
+            await delay(80);
+            try { await action(); } catch (e) { console.error(e); }
+        });
+        return btn;
+    }
+
+    /* ═══════════════════════════════════════════════
+       SECTION 1 — GAM ISSUE LISTENERS (iframe only)
+    ═══════════════════════════════════════════════ */
+    async function setupGAMIssueAutoTransfer() {
+
+        // Match label case-insensitively so 'Gamissue' / 'GAMIssue' / 'gamissue' all work
+        function findGAMSection() {
+            for (const sec of document.querySelectorAll('.css-19hedjk')) {
+                const header = sec.querySelector('p.css-17xh5uu');
+                if (header && header.textContent.trim().toLowerCase() === 'gamissue') {
+                    return sec;
+                }
+            }
+            return null;
+        }
+
+        function getGAMIssueValue() {
+            const sec = findGAMSection();
+            if (!sec) return null;
+            for (const r of sec.querySelectorAll('input[type="radio"]')) {
+                if (r.checked) {
+                    // Return normalised uppercase so YES/Yes/yes all match
+                    return (r.value || r.parentElement?.textContent || '').trim().toUpperCase();
+                }
+            }
+            return null;
+        }
+
+        async function enableTransferAndSelectP0L1() {
+            // Step 1: tick the transfer checkbox
+            const checkbox = document.querySelector('[data-testid="transfer-form-checkbox"]');
+            if (!checkbox) { console.warn('GAM: transfer checkbox not found'); return; }
+            if (checkbox.getAttribute('aria-checked') !== 'true') {
+                checkbox.click();
+                await delay(400);
+            }
+
+            // Step 2: open the queue dropdown
+            const selector = document.querySelector('[data-testid="transfer-form-queue-selector"]');
+            if (!selector) { console.warn('GAM: queue selector not found'); return; }
+            selector.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+            selector.dispatchEvent(new MouseEvent('click',     { bubbles: true }));
+            await delay(500);
+
+            // Step 3: find the options list (React renders it outside the selector)
+            const list = document.querySelector('[role="listbox"]') ||
+                         document.querySelector('[id*="options-list"]') ||
+                         document.querySelector('[class*="menu"]');
+            if (!list) { console.warn('GAM: queue options list not found'); return; }
+
+            // Step 4: click PBG_Hierarchy_Places_P0_L1
+            let found = false;
+            for (const opt of list.querySelectorAll('[role="option"], li')) {
+                if (opt.textContent.trim() === 'PBG_Hierarchy_Places_P0_L1') {
+                    opt.scrollIntoView({ block: 'nearest' });
+                    opt.click();
+                    await delay(300);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) { console.warn('GAM: P0L1 option not found in list'); return; }
+
+            // Step 5: verify — retry once if value didn't apply
+            await delay(300);
+            const valueEl = selector.querySelector('[id*="-value"], .css-1h2ruwl, [class*="singleValue"]');
+            if (valueEl && valueEl.textContent.trim() !== 'PBG_Hierarchy_Places_P0_L1') {
+                console.warn('GAM: queue value not applied, retrying...');
+                await delay(500);
+                enableTransferAndSelectP0L1();
+            } else {
+                console.log('GAM: P0L1 queue set ✔');
+            }
+        }
+
+        async function disableTransfer() {
+            const checkbox = document.querySelector('[data-testid="transfer-form-checkbox"]');
+            if (checkbox && checkbox.getAttribute('aria-checked') === 'true') {
+                checkbox.click();
+                console.log('GAM: transfer unticked');
+            }
+        }
+
+        function applyLogic() {
+            const val = getGAMIssueValue();  // already uppercased
+            console.log('GAM applyLogic: val='+val);
+            if (val === 'YES') enableTransferAndSelectP0L1();
+            else if (val === 'NO' || val === 'NA') disableTransfer();
+        }
+
+        // Wait for GAMIssue radios to appear in DOM, then attach
+        async function attachGAMListeners() {
+            // Poll until section with label 'gamissue' (any case) has radios
+            const gamSection = await waitFor(() => {
+                const sec = findGAMSection();
+                if (sec && sec.querySelectorAll('input[type="radio"]').length > 0) return sec;
+                return null;
+            }, 20000);
+
+            if (!gamSection) {
+                console.warn('Gamissue section not found after 20s — retrying in 5s');
+                setTimeout(attachGAMListeners, 5000);
+                return;
+            }
+
+            gamSection.querySelectorAll('input[type="radio"]').forEach(r => {
+                r.addEventListener('change', applyLogic);
+                r.addEventListener('click',  applyLogic);
+            });
+
+            console.log('Gamissue listeners attached ✔ (' +
+                gamSection.querySelectorAll('input[type="radio"]').length + ' radios)');
+            setTimeout(applyLogic, 300);
+        }
+
+        attachGAMListeners();
+    }
+
+    /* ═══════════════════════════════════════════════
+       SECTION 2 — REMARKS DROPDOWN (iframe only)
+    ═══════════════════════════════════════════════ */
+
+
+    /* ═══════════════════════════════════════════════
+       SECTION 3 — NEI BUTTON (iframe only)
+    ═══════════════════════════════════════════════ */
+    async function handleNEI_main() {
+        showPopup('NEI selected');
+        await selectDropdownByText('GAMIssue', 'NA');
+        await selectRadioByValue('No SDPP issue');
+        await selectDropdownByText('CDPType', 'NA');
+        await selectDropdownByText('GeocodeAccuracy', 'NEI');
+        await selectDropdownByText('SourceOfGeocodes', 'NA');
+        await selectDropdownByText('PODScanAccuracy', 'NO-POD');
+        await selectDropdownByText('ScanLocationAccuracy', 'Others(remarks)');
+        await selectDropdownByText('AuditCode', 'NA');
+        await selectDropdownByText('TranscriptAnalysis', 'NA');
+        showPopup('NEI applied', 1200);
+    }
+
+    async function injectButtonsNearGeocode() {
+        let geocodeEl = document.getElementById('GeocodeAccuracy');
+        if (!geocodeEl) {
+            const lbl = Array.from(document.querySelectorAll('p,span,label,div'))
+                .find(el => el.textContent?.trim() === 'Geocode Accuracy');
+            if (lbl) geocodeEl = lbl.closest('div')?.querySelector('[role="combobox"],[id*="Geocode"]') || null;
+        }
+        if (!geocodeEl?.parentElement) { console.warn('NEI button: Geocode Accuracy field not found'); return; }
+        const buttons = [];
+        const neiBtn = createSmallButton('NEI', handleNEI_main, buttons);
+        buttons.push(neiBtn);
+        const wrapper = document.createElement('div');
+        wrapper.style.display = 'inline-flex'; wrapper.style.alignItems = 'center';
+        wrapper.appendChild(neiBtn);
+        geocodeEl.parentElement.appendChild(wrapper);
+    }
+
+
+    /* ═══════════════════════════════════════════════
+       SECTION 4 — AUTO AUDIT CODE (HYBRID v8)
+       Radio + Dropdown Compatible
+    ═══════════════════════════════════════════════ */
+
+    function getSelectedRadioValueBySection(title){
+        const titleLower = title.toLowerCase().replace(/[\s_-]/g,'');
+        const sec = [...document.querySelectorAll("fieldset, div, p, span, label")]
+            .find(el => {
+                const t = el.textContent.trim().toLowerCase().replace(/[\s_-]/g,'');
+                return t.startsWith(titleLower) && el.querySelectorAll('input[type="radio"]').length > 0;
+            });
+        if(!sec) return null;
+        const checked = sec.querySelector('input[type="radio"]:checked');
+        if(!checked) return null;
+        const lbl = checked.closest('label') || checked.parentElement;
+        return lbl?.textContent?.trim() || checked.value || null;
+    }
+
+    // Read Address Type from: <p class="css-17xh5uu">Address Type</p>
+    // The value div sits as a sibling inside the same .css-wncc9b row container.
+    // Structure: .css-wncc9b > p.css-17xh5uu (label) + .css-189kjnx (value)
+    function getAddressTypeValue(){
+        const labels = document.querySelectorAll('p.css-17xh5uu, p.css-1wmy4xi');
+        for(const lbl of labels){
+            if(lbl.textContent.trim() === 'Address Type'){
+                // Value sibling is .css-189kjnx in the same parent row
+                const row = lbl.parentElement;
+                if(row){
+                    // Try direct sibling value element first
+                    const valEl = row.querySelector('.css-189kjnx') ||
+                                  row.querySelector('div.css-189kjnx');
+                    if(valEl){
+                        const txt = valEl.textContent.trim();
+                        if(txt && txt !== 'Address Type'){
+                            console.log('[AddressType] read from css-189kjnx:', txt);
+                            return txt;
+                        }
+                    }
+                    // Fallback: next sibling element
+                    let sib = lbl.nextElementSibling;
+                    while(sib){
+                        const txt = sib.textContent.trim();
+                        if(txt && txt !== 'Address Type' && txt.length < 100){
+                            console.log('[AddressType] read from sibling:', txt);
+                            return txt;
+                        }
+                        sib = sib.nextElementSibling;
+                    }
+                }
+            }
+        }
+        // Fallback
+        const fb = getSelectedRadioValueBySection("AddressType") ||
+                   getDropdownValue('AddressType','addresstype') || '';
+        console.log('[AddressType] fallback value:', fb);
+        return fb;
+    }
+
+    function getDropdownValue(...ids){
+        for(const id of ids){
+            const el = document.getElementById(id+'-value') ||
+                       document.getElementById(id) ||
+                       document.querySelector('[data-testid="'+id+'"] [id$="-value"]') ||
+                       document.querySelector('[id*="'+id+'"][id*="value"]');
+            if(el){
+                const txt = (el.innerText || el.textContent || '').trim();
+                if(txt && txt !== 'Select...' && txt !== '—') return txt;
+            }
+        }
+        return '';
+    }
+
+    function getCDPValue(){
+        return getSelectedRadioValueBySection("CDPType") ||
+               getSelectedRadioValueBySection("CDP") ||
+               getDropdownValue('CDPType','CDP','cdptype') ||
+               (() => {
+                   const cdpLabel = [...document.querySelectorAll('p,label,span,div')]
+                       .find(el => /cdp\s*type/i.test(el.textContent.trim()) && el.textContent.trim().length < 30);
+                   if(!cdpLabel) return '';
+                   const container = cdpLabel.closest('[class]') || cdpLabel.parentElement;
+                   const combo = container?.querySelector('[role="combobox"],[id$="-value"],[id*="cdp"]');
+                   return (combo?.innerText || combo?.textContent || '').trim();
+               })();
+    }
+
+    function getPODValue(){
+        return getSelectedRadioValueBySection("Podaccuracy") ||
+               getSelectedRadioValueBySection("Scanaccuracy") ||
+               getSelectedRadioValueBySection("PODScanAccuracy") ||
+               getSelectedRadioValueBySection("ScanAccuracy") ||
+               getDropdownValue('PODScanAccuracy','ScanAccuracy','Scanaccuracy','podaccuracy') ||
+               (() => {
+                   const podLabel = [...document.querySelectorAll('p,label,span,div')]
+                       .find(el => /pod|scan\s*accuracy/i.test(el.textContent.trim()) && el.textContent.trim().length < 40);
+                   if(!podLabel) return '';
+                   const container = podLabel.closest('[class]') || podLabel.parentElement;
+                   const combo = container?.querySelector('[role="combobox"],[id$="-value"]');
+                   return (combo?.innerText || combo?.textContent || '').trim();
+               })();
+    }
+
+    // Read ScanAccuracy field separately (used as fallback when POD = NO-POD/unclear)
+    function getScanAccuracyValue(){
+        return getSelectedRadioValueBySection("ScanAccuracy") ||
+               getSelectedRadioValueBySection("Scanaccuracy") ||
+               getDropdownValue('ScanAccuracy','scanaccuracy','Scanaccuracy') ||
+               (() => {
+                   const lbl = [...document.querySelectorAll('p,label,span,div')]
+                       .find(el => /^scan\s*accuracy$/i.test(el.textContent.trim()));
+                   if(!lbl) return '';
+                   const container = lbl.closest('[class]') || lbl.parentElement;
+                   const combo = container?.querySelector('[role="combobox"],[id$="-value"]');
+                   return (combo?.innerText || combo?.textContent || '').trim();
+               })();
+    }
+
+    async function selectOptionSmart(label){
+        // Try radio first
+        const radios=document.querySelectorAll('input[type="radio"]');
+        for(const r of radios){
+            const lbl=r.closest('label')||r.parentElement;
+            if(lbl && lbl.textContent.includes(label)){
+                r.click(); await delay(150); return true;
+            }
+        }
+        // Then dropdown
+        return await selectDropdownByText('AuditCode', label);
+    }
+
+    // Normalise: lowercase, strip spaces/dashes/underscores/slashes/dots
+    function normCDP(s){ return (s||'').toLowerCase().replace(/[\s_\-/\.]/g,''); }
+
+    // ── Rule B: Other address types ──
+    // These specific CDPs + SCANnotatCDP → Customer Expectation Mismatch
+    // Everything else + SCANnotatCDP → Driver Issue
+    const SPECIAL_CDP_FOR_CEM = [
+        // Delivery Location variants that ARE special
+        "delivery location -rear door/porch",
+        "delivery location -side door/porch",
+        "delivery location -basement door",
+        // Package Placement (all)
+        "package placement -hide/behind object",
+        "package placement -under object",
+        "package placement -inside object",
+        "package placement -other specific spots",
+        // Customer Alert Actions (all)
+        "customer alert actions -knock/ring",
+        "customer alert actions -call/text",
+        // Short codes
+        "deliverylocationreardoor", "deliverylocationreardoor",
+        "deliverylocationreardoorporch",
+        "deliverylocationsidedoor", "deliverylocationsidedoorporch",
+        "deliverylocationbasementdoor",
+        "packageplacementhidebehind", "packageplacementunderobject",
+        "packageplacementinsideobject", "packageplacementotherspecificspots",
+        "customeralertactionsknockring", "customeralertactionscalltext",
+        // Legacy codes
+        "rear_door","reardoor","rear_porch","rearporch",
+        "side_porch","sideporch","side_door","sidedoor",
+        "basementdoor",
+        "hidebehind","underobject","insideobject","otherspecificspots",
+        "ringknock","ring_knock","callcustomer",
+        "undertableflowerpot","behindscreen","nearobject","otherspecificinstructions",
+    ];
+
+    // POD values that are "no data" — need to fall back to ScanAccuracy field
+    const NO_DATA_PODS = ['no-pod','nopod','noscandata','podunclear',
+                          'nopodnoscandata','nopodnoscandata/podunclear',
+                          'nopodnoscandata/unclear'];
+
+    // Both DH mismatch address types trigger Customer Expectation Mismatch
+    const DH_ADDR_MISMATCH_NORM = ['aiddhaddressmismatch','dhpdlmismatch'];
+
+    function determineAuditHybrid(addressType, cdp, pod, scanAccuracy, auditResolution){
+        if(!pod && !scanAccuracy) return null;
+
+        const cdpN    = normCDP(cdp);
+        const addrN   = normCDP(addressType);
+        const resNorm = (auditResolution||'').trim().toUpperCase();
+
+        // If POD is a no-data value, use ScanAccuracy instead
+        const podRaw  = (NO_DATA_PODS.some(v => normCDP(pod).includes(v)) && scanAccuracy)
+                        ? scanAccuracy
+                        : pod;
+        const podNorm = (podRaw||'').trim();
+        const podN    = normCDP(podRaw);
+
+        // ── FIXED resolution → No Issue Found always ──
+        if(resNorm === 'FIXED') return "No Issue Found";
+
+        // ── SCANatDifferentAddress → Driver Issue always (checked before everything) ──
+        if(podNorm === 'SCANatDifferentAddress') return "Driver Issue";
+
+        // ── AID_DH_Address_Mismatch OR DH_PDL_Mismatch address type ──
+        // Takes priority over SCANatCDP+NGFR rule — DH mismatch always = CEM
+        const isDHMismatch = DH_ADDR_MISMATCH_NORM.includes(addrN);
+        if(isDHMismatch){
+            return "Customer Expectation Mismatch";
+        }
+
+        // ── SCANatCDP + NGFR → Unknown (only for non-DH-mismatch address types) ──
+        if(podNorm === 'SCANatCDP' && resNorm === 'NGFR') return "Unknown";
+
+        // ── All other address types ──
+
+        // DH Unavailable or Additional Address Info CDP → Driver Issue always
+        if(cdpN.startsWith('dhunavailable') || cdpN.startsWith('additionaladdress'))
+            return "Driver Issue";
+
+        // SCANatMDL / SCANatVicinity only valid with DH Unavailable CDP — warning shown elsewhere
+        // For audit code purposes treat as No Issue Found
+        if(podNorm === 'SCANatMDL' || podNorm === 'SCANatVicinity')
+            return "No Issue Found";
+
+        // Check if CDP is in the special list (exact normalised match)
+        const isSpecialCDP = SPECIAL_CDP_FOR_CEM.some(t => normCDP(t) === cdpN);
+
+        // Special CDP + SCANnotatCDP OR SCANatCDP → Customer Expectation Mismatch
+        if(isSpecialCDP && (podNorm === 'SCANnotatCDP' || podNorm === 'SCANatCDP')) return "Customer Expectation Mismatch";
+
+        // Good scans → No Issue Found
+        if(['SCANatCDP','SCANatUnit','SCANatUnit/Building','SCANonBuilding'].some(v => podNorm === v))
+            return "No Issue Found";
+
+        // SCANnotatCDP with non-special CDP → Driver Issue
+        if(podNorm === 'SCANnotatCDP') return "Driver Issue";
+
+        // Others/remarks/NA/NEI/no-data → Driver Issue
+        if(['Others(remarks)','NA','NEI'].includes(podNorm)) return "Driver Issue";
+        if(NO_DATA_PODS.some(v => podN.includes(v))) return "Driver Issue";
+
+        return "No Issue Found";
+    }
+
+    let __auditSettingInProgress = false;   // blocks recheck while we set audit code
+    let __auditManuallyChanged   = false;   // user manually changed AuditCode → skip auto-fill until inputs change
+
+    async function autoFillAuditCode(){
+        if(__auditSettingInProgress) return;   // prevent re-entry while we're setting audit
+        if(__auditManuallyChanged)   return;   // user manually set audit — don't overwrite
+
+        const addressType    = getAddressTypeValue();
+        const cdp            = getCDPValue();
+        const pod            = getPODValue();
+        const scanAccuracy   = getScanAccuracyValue();
+        const auditResolution = getSelectedRadioValueBySection("AuditResolution") ||
+                                getDropdownValue('AuditResolution','auditresolution') || '';
+
+        console.log('[AuditAuto] addressType='+addressType+' | cdp='+cdp+
+                    ' | pod='+pod+' | scan='+scanAccuracy+' | res='+auditResolution);
+
+        if(!pod && !scanAccuracy) return;
+
+        // ── Warning: SCANatMDL / SCANatVicinity should only be used with DH Unavailable CDP ──
+        const podActive = (pod||'').trim();
+        const cdpN = normCDP(cdp);
+        if((podActive === 'SCANatMDL' || podActive === 'SCANatVicinity') &&
+           !cdpN.startsWith('dhunavailable')){
+            showPopup('⚠️ '+podActive+' is typically only valid when CDP = DH Unavailable', 3500);
+        }
+
+        const required = determineAuditHybrid(addressType, cdp, pod, scanAccuracy, auditResolution);
+        console.log('[AuditAuto] => required='+required);
+        if(!required) return;
+
+        // Block observer during the DOM change caused by setting audit code
+        __auditSettingInProgress = true;
+        __auditManuallyChanged   = false;  // we are setting it programmatically, clear flag
+        await selectOptionSmart(required);
+        setTimeout(() => { __auditSettingInProgress = false; }, 600);
+    }
+
+    // IDs that should trigger audit re-evaluation when changed
+    const AUDIT_TRIGGER_IDS = ['CDPType','PODScanAccuracy','ScanAccuracy','Scanaccuracy','AuditResolution'];
+    // IDs that must NEVER trigger auto-fill (user is manually choosing these)
+    const AUDIT_SKIP_IDS    = ['AuditCode','Auditcode','auditcode'];
+
+    async function setupAutoAuditListeners(){
+        async function attachObserverToEl(id) {
+            const el = document.getElementById(id);
+            if(!el) return false;
+            const obs = new MutationObserver(async (mutations) => {
+                for(const m of mutations){
+                    if(m.type === 'attributes' && m.attributeName === 'aria-expanded'){
+                        // Only fire when dropdown CLOSES (user finished picking)
+                        if(m.target.getAttribute('aria-expanded') === 'false'){
+                            if(__auditSettingInProgress) return;
+                            __auditManuallyChanged = false;  // input changed → re-enable auto-fill
+                            await delay(350);
+                            await autoFillAuditCode();
+                        }
+                    }
+                }
+            });
+            obs.observe(el, { attributes: true });
+            return true;
+        }
+
+        // Also watch AuditCode — but only to SET __auditManuallyChanged flag, not re-run
+        async function attachAuditCodeGuard() {
+            const el = document.getElementById('AuditCode') ||
+                       document.getElementById('Auditcode');
+            if(!el) return false;
+            const obs = new MutationObserver(async (mutations) => {
+                for(const m of mutations){
+                    if(m.type === 'attributes' && m.attributeName === 'aria-expanded'){
+                        // When AuditCode dropdown CLOSES, mark that the user touched it
+                        if(m.target.getAttribute('aria-expanded') === 'false' && !__auditSettingInProgress){
+                            __auditManuallyChanged = true;
+                            console.log('[AuditGuard] User manually changed AuditCode — auto-fill paused until inputs change');
+                        }
+                    }
+                }
+            });
+            obs.observe(el, { attributes: true });
+            return true;
+        }
+
+        // Radio changes (Podaccuracy uses radios) — these are INPUT changes, reset manual flag
+        document.addEventListener("change", (e) => {
+            if(e.target.type === "radio" && !__auditSettingInProgress){
+                __auditManuallyChanged = false;  // input changed → re-enable auto-fill
+                setTimeout(autoFillAuditCode, 350);
+            }
+        });
+
+        // Try to attach to all trigger dropdowns, retry until mounted
+        let attached = {};
+        async function tryAttachAll() {
+            for(const id of AUDIT_TRIGGER_IDS){
+                if(!attached[id]) attached[id] = await attachObserverToEl(id);
+            }
+            attached['AuditCode'] = await attachAuditCodeGuard();
+            if(Object.values(attached).some(v => !v)){
+                setTimeout(tryAttachAll, 2000);
+            }
+        }
+        await tryAttachAll();
+        console.log("AutoAudit listeners attached (aria-expanded + manual-guard mode)");
+    }
+
+    /* ═══════════════════════════════════════════════
+       SECTION 5 — POD SEARCH v2.0 CORE
+       (highlight + nearest camera + scroll)
+       Used by both manual 📷 POD button AND auto-trigger
+    ═══════════════════════════════════════════════ */
+    const podCameraState = new Map();
+
+    // Inject highlight style once
+    (() => {
+        const s = document.createElement('style');
+        s.innerHTML = `.tracking-highlight{background-color:yellow!important;color:black!important;padding:1px 2px;border-radius:2px;}`;
+        document.head.appendChild(s);
+    })();
+
+    function removeHighlights() {
+        document.querySelectorAll('.tracking-highlight').forEach(el =>
+            el.replaceWith(document.createTextNode(el.textContent))
+        );
+    }
+
+
+
+    function highlightAllMatches(text) {
+        if (!text || text === 'N/A' || text === '-') return 0;
+        removeHighlights();
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+            acceptNode: node =>
+                node.parentElement && !node.parentElement.closest('#r_pod_case_details_panel')
+                    ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT
+        });
+        let count = 0, node;
+        while ((node = walker.nextNode())) {
+            if (!node.nodeValue.includes(text)) continue;
+            const parts = node.nodeValue.split(text);
+            const frag = document.createDocumentFragment();
+            parts.forEach((part, i) => {
+                frag.appendChild(document.createTextNode(part));
+                if (i < parts.length - 1) {
+                    const span = document.createElement('span');
+                    span.className = 'tracking-highlight';
+                    span.textContent = text;
+                    frag.appendChild(span);
+                    count++;
+                }
+            });
+            node.replaceWith(frag);
+        }
+        return count;
+    }
+
+    function findNearestCameraButton(highlightEl) {
+        const hr = highlightEl.getBoundingClientRect();
+        let nearestBtn = null, nearestDist = Infinity;
+        document.querySelectorAll('button[aria-label="View photo"]').forEach(btn => {
+            const r = btn.getBoundingClientRect();
+            const d = Math.sqrt((r.left - hr.left) ** 2 + (r.top - hr.top) ** 2);
+            if (d < nearestDist) { nearestDist = d; nearestBtn = btn; }
+        });
+        return nearestBtn;
+    }
+
+    function startPODSearchForTracking(trackingId) {
+        if (!trackingId || trackingId === 'N/A' || trackingId === '-') return;
+        // Clear any stale camera run
+        if (podCameraState.has(trackingId)) {
+            clearInterval(podCameraState.get(trackingId).intervalId);
+            podCameraState.delete(trackingId);
+        }
+        const matchCount = highlightAllMatches(trackingId);
+        showPopup(`📷 POD: ${matchCount} match(es) found`, 1800);
+
+        let attempts = 0;
+        const intervalId = setInterval(() => {
+            const highlightEl = document.querySelector('.tracking-highlight');
+            if (!highlightEl) { clearInterval(intervalId); return; }
+            const btn = findNearestCameraButton(highlightEl);
+            if (btn) {
+                btn.click();
+                highlightEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                attempts++;
+            }
+            if (attempts >= 3) clearInterval(intervalId);
+        }, 800);
+
+        podCameraState.set(trackingId, { attempts, intervalId });
+    }
+
+    /* ═══════════════════════════════════════════════
+       SECTION 6 — PAST DELIVERIES AUTOMATION
+       (main window only)
+       Auto-opens Past Deliveries panel, sets
+       Attribute → Count, Filter → All.
+       After load completes → auto-fires POD Search.
+    ═══════════════════════════════════════════════ */
+    // Shared reference so POD panel can pass TrackingId here
+    let _lastKnownTrackingId = null;
+
+    async function runPastDeliveriesSequence(retryAttempt = 0) {
+        try {
+            const pastDelsBtn = Array.from(document.querySelectorAll('p.css-1oqpb4x'))
+                .find(el => el.innerText.trim() === "Past deliveries");
+            if (!pastDelsBtn) return false;
+
+            pastDelsBtn.scrollIntoView({ behavior: "smooth", block: "center" });
+            pastDelsBtn.click();
+            await delay(1500);  // wait for panel to open
+
+            let attrFound = false;
+            const dropdownBoxes = document.querySelectorAll('div[role="combobox"]');
+
+            dropdownBoxes.forEach(box => {
+                if (!box.textContent.includes('Attribute')) return;
+                attrFound = true;
+
+                // Open Attribute dropdown
+                box.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true, cancelable: true }));
+
+                setTimeout(() => {
+                    // Select "Count"
+                    ['div[role="option"]', 'li', 'div', 'span'].forEach(sel => {
+                        document.querySelectorAll(sel).forEach(item => {
+                            if (item.textContent.trim() === 'Count') {
+                                item.click();
+                                item.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                                item.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true }));
+                            }
+                        });
+                    });
+
+                    setTimeout(() => {
+                        // Open Recent 10 → select All
+                        document.querySelectorAll('div[role="combobox"]').forEach(filterBox => {
+                            if (!filterBox.textContent.includes('Recent 10')) return;
+                            filterBox.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true, cancelable: true }));
+
+                            setTimeout(() => {
+                                document.querySelectorAll('div[role="option"],li,div,span').forEach(opt => {
+                                    if (opt.textContent.trim() === 'All') {
+                                        opt.click();
+                                        opt.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                                        opt.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true }));
+                                    }
+                                });
+
+                                // ── AUTO-TRIGGER POD SEARCH after past deliveries loads ──
+                                // Give the list ~3 seconds to render, then fire POD Search
+                                setTimeout(() => {
+                                    if (_lastKnownTrackingId &&
+                                        _lastKnownTrackingId !== 'N/A' &&
+                                        _lastKnownTrackingId !== '-') {
+                                        console.log(`[AutoPOD] Firing POD Search for ${_lastKnownTrackingId}`);
+                                        startPODSearchForTracking(_lastKnownTrackingId);
+                                    }
+                                }, 3000);
+
+                            }, 100);
+                        });
+                    }, 100);
+                }, 100);
+            });
+
+            if (!attrFound && retryAttempt < 1) {
+                await delay(2000);
+                return runPastDeliveriesSequence(retryAttempt + 1);
+            }
+            return attrFound;
+
+        } catch (e) {
+            console.error('[PastDels] Error:', e);
+            return false;
+        }
+    }
+
+    /* ── Past Deliveries monitor (main window only) ── */
+    function initPastDeliveriesMonitor() {
+        let prevTimerVal = '';
+        let prevAddrId   = null;
+
+        function extractAddressId() {
+            for (const block of document.getElementsByClassName('css-wncc9b')) {
+                const k = block.querySelector('.css-1wmy4xi');
+                const v = block.querySelector('.css-189kjnx');
+                if (k?.textContent.trim() === 'AddressId') return v?.textContent.trim() || null;
+            }
+            return null;
+        }
+
+        function timerChanged(timerVal) {
+            if (timerVal === prevTimerVal) { prevTimerVal = timerVal; return false; }
+            const [cm, cs] = timerVal.split(':').map(Number);
+            const [lm, ls] = (prevTimerVal || '0:0').split(':').map(Number);
+            const curr = cm * 60 + cs, last = lm * 60 + ls;
+            prevTimerVal = timerVal;
+            return curr > last && curr >= 1 && curr <= 10000;
+        }
+
+        async function tick() {
+            const timerEl = document.querySelector(".css-laozi4 .css-2lt2bb");
+            if (timerEl && timerChanged(timerEl.textContent.trim())) {
+                await delay(2000);
+                await runPastDeliveriesSequence();
+            } else {
+                const addrId = extractAddressId();
+                if (addrId && addrId !== prevAddrId) {
+                    prevAddrId = addrId;
+                    await delay(2000);
+                    await runPastDeliveriesSequence();
+                }
+            }
+            setTimeout(tick, 1000);
+        }
+
+        // P key manual shortcut
+        document.addEventListener("keydown", (e) => {
+            if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable) return;
+            if (e.key.toLowerCase() === 'p') {
+                console.log("[PastDels] P key pressed — manual trigger");
+                runPastDeliveriesSequence();
+            }
+        });
+
+        setTimeout(tick, 2000);
+        console.log("📦 Past Deliveries monitor started (+ auto POD Search after load)");
+    }
+
+    /* ═══════════════════════════════════════════════
+       SECTION 7 — POD FLOATING PANEL (main window)
+    ═══════════════════════════════════════════════ */
+    (function PODPanel() {
+        if (!ENABLE_POD_PANEL) return;
+
+        let R_lastAddressId   = null;
+        let R_caseDetailsPanel = null;
+        let R_lastTimerValue  = '';
+        let R_isProcessing    = false;
+        let R_selectedTrackingId = null;
+        let R_podSearchTab    = null;
+        let R_podSelectionTab = null;
+
+        // Each entry: [canonicalKey, ...pageLabels that map to it]
+        // Script checks ALL label variants so it works on any page version.
+        const R_fieldMap = [
+            { key: 'TrackingId',       labels: ['TrackingId',   'trackingid']                      },
+            { key: 'DPVended',         labels: ['DPVended',     'suggested_pdp']                    },
+            { key: 'REVended',         labels: ['REVended',     'suggested_pre']                    },
+            { key: 'Defecttype',       labels: ['Defecttype',   'DefectType']                       },
+            { key: 'orderingorderid1', labels: ['orderingorderid1']                                 },
+            { key: 'orderingorderid2', labels: ['orderingorderid2']                                 },
+            { key: 'PrevAuditDate',    labels: ['workdate',     'PrevAuditDate', 'WorkDate']        },
+            { key: 'ComId1',           labels: ['ComId1',       'comid1']                            },
+        ];
+        // Flat set of all labels for fast lookup during DOM walk
+        const R_targetCaseDetails = R_fieldMap.flatMap(f => f.labels);
+
+        /* ── panel creation ── */
+        function createFloatingPanel() {
+            if (R_caseDetailsPanel) return R_caseDetailsPanel;
+            R_caseDetailsPanel = document.createElement('div');
+            R_caseDetailsPanel.id = 'r_pod_case_details_panel';
+            R_caseDetailsPanel.style.cssText = `
+                position:fixed; top:50px; right:400px; width:auto; max-width:560px;
+                background-color:rgba(0,0,0,0.6); color:white; border-radius:10px;
+                padding:15px; z-index:99998; font-family:'Roboto',Arial,sans-serif;
+                font-size:14px; line-height:1.4; display:block;
+                box-shadow:0 4px 12px rgba(0,0,0,0.2); cursor:move; user-select:none;
+            `;
+            document.body.appendChild(R_caseDetailsPanel);
+
+            /* draggable */
+            let isDragging = false, offsetX = 0, offsetY = 0;
+            R_caseDetailsPanel.addEventListener('mousedown', e => {
+                isDragging = true;
+                offsetX = e.clientX - R_caseDetailsPanel.offsetLeft;
+                offsetY = e.clientY - R_caseDetailsPanel.offsetTop;
+            });
+            document.addEventListener('mousemove', e => {
+                if (!isDragging) return;
+                R_caseDetailsPanel.style.left  = (e.clientX - offsetX) + 'px';
+                R_caseDetailsPanel.style.top   = (e.clientY - offsetY) + 'px';
+                R_caseDetailsPanel.style.right = 'auto';
+            });
+            document.addEventListener('mouseup', () => { isDragging = false; });
+
+            /* delegated clicks (survive innerHTML swaps) */
+            R_caseDetailsPanel.addEventListener('click', e => {
+                const panel = R_caseDetailsPanel;
+
+                if (e.target.id === 'r_dpvended_link') {
+                    const raw = panel.dataset.dpValue;
+                    if (raw && raw !== 'N/A') R_handlePasteToGeocode(formatLatLon(raw), ', ');
+                }
+                if (e.target.id === 'r_scangeocodes_link') {
+                    const raw = panel.dataset.scanValue;
+                    if (raw && raw !== 'N/A') R_handlePasteToGeocode(formatLatLon(raw), ', ');
+                }
+                if (e.target.id === 'r_orderid1_link') {
+                    const v = panel.dataset.orderId1Value;
+                    if (v && v !== 'N/A') navigator.clipboard.writeText(v).catch(() => {});
+                }
+                if (e.target.id === 'r_orderid2_link') {
+                    const v = panel.dataset.orderId2Value;
+                    if (v && v !== 'N/A') navigator.clipboard.writeText(v).catch(() => {});
+                }
+
+                /* ── BUTTON 1: logistics.amazon.com ── */
+                if (e.target.id === 'r_open_tracking_link') {
+                    e.preventDefault();
+                    const tid = R_selectedTrackingId || panel.dataset.trackingIdValue;
+                    if (tid && tid !== 'N/A') openTrackingTab(tid, false);
+                }
+
+                /* ── BUTTON 2: 📷 POD Search (manual click) ── */
+                if (e.target.id === 'r_pod_search_btn') {
+                    e.preventDefault(); e.stopPropagation();
+                    const tid = R_selectedTrackingId || panel.dataset.trackingIdValue;
+                    if (tid && tid !== 'N/A' && tid !== '-') startPODSearchForTracking(tid);
+                }
+            });
+
+            return R_caseDetailsPanel;
+        }
+
+        function formatLatLon(val) {
+            if (!val || val === 'N/A') return val;
+            if (/, *-/.test(val)) return val;
+            const m = val.match(/^([+-]?\d+(?:\.\d+)?)[\s]*-([\d.+-].*)$/);
+            if (m) return `${m[1]}, -${m[2].replace(/^\+/, '')}`;
+            return val.replace(/\s*-\s*/g, ', -');
+        }
+
+        function updateFloatingPanel(caseDetails = {}) {
+            const panel = createFloatingPanel();
+
+            const trackingIdValue      = R_selectedTrackingId || caseDetails['TrackingId'] || '-';
+            const dpVendedRaw          = caseDetails['DPVended'] || 'N/A';
+            const revendedRaw          = caseDetails['REVended'] || 'N/A';
+            const defectTypeValue      = caseDetails['Defecttype'] || 'N/A';
+            const prevAuditDateValue   = caseDetails['PrevAuditDate'] || '-';
+            const comId1Value          = caseDetails['ComId1'] || '-';
+            const orderingOrderId1Value = caseDetails['orderingorderid1'] || '-';
+            const orderingOrderId2Value = caseDetails['orderingorderid2'] || '-';
+            const dpVendedValue        = dpVendedRaw !== 'N/A' ? formatLatLon(dpVendedRaw) : '-';
+            const revendedValue        = revendedRaw !== 'N/A' ? formatLatLon(revendedRaw) : '-';
+
+            // Keep shared reference updated for auto POD trigger
+            _lastKnownTrackingId = trackingIdValue;
+
+            panel.dataset.trackingIdValue  = trackingIdValue;
+            panel.dataset.dpValue          = dpVendedRaw;
+            panel.dataset.scanValue        = revendedRaw;
+            panel.dataset.orderId1Value    = orderingOrderId1Value;
+            panel.dataset.orderId2Value    = orderingOrderId2Value;
+
+            panel.innerHTML = `
+                <div style="margin-bottom:10px;display:flex;align-items:center;flex-wrap:wrap;gap:6px;">
+                    <strong>Tracking ID:</strong>
+
+                    <!-- BUTTON 1 — open logistics.amazon.com (original) -->
+                    <a href="#" id="r_open_tracking_link"
+                       title="Open in logistics.amazon.com"
+                       style="margin-left:8px;color:#00d4ff;text-decoration:none;cursor:pointer;font-weight:bold;">
+                        ${trackingIdValue}
+                    </a>
+
+                    <!-- BUTTON 2 — POD Search: highlight + nearest camera + scroll -->
+                    <button id="r_pod_search_btn"
+                        title="Highlight Tracking ID on page + open nearest photo + scroll to it"
+                        style="padding:2px 9px;background:#1a73e8;color:#fff;border:none;
+                               border-radius:4px;font-size:12px;font-weight:700;cursor:pointer;
+                               margin-left:4px;font-family:Arial,sans-serif;line-height:1.5;">
+                        📷 POD
+                    </button>
+                </div>
+                <div style="margin:6px 0;">
+                    <strong>DPVended:</strong>
+                    <span id="r_dpvended_link" style="margin-left:8px;cursor:pointer;">${dpVendedValue}</span>
+                </div>
+                <div style="margin:6px 0;">
+                    <strong>REVended:</strong>
+                    <span id="r_scangeocodes_link" style="margin-left:8px;cursor:pointer;">${revendedValue}</span>
+                </div>
+                <div style="margin:6px 0;">
+                    <strong>DefectType:</strong>
+                    <span>${defectTypeValue}</span>
+                </div>
+                <div style="margin:6px 0;">
+                    <strong>Order ID 1:</strong>
+                    <span id="r_orderid1_link" style="margin-left:8px;cursor:pointer;">${orderingOrderId1Value}</span>
+                </div>
+                <div style="margin:6px 0;">
+                    <strong>Order ID 2:</strong>
+                    <span id="r_orderid2_link" style="margin-left:8px;cursor:pointer;">${orderingOrderId2Value}</span>
+                </div>
+                <div style="margin:6px 0;">
+                    <strong>PrevAuditDate:</strong>
+                    <span style="margin-left:8px;color:#ffd700;">${prevAuditDateValue}</span>
+                </div>
+                <div style="margin:6px 0;">
+                    <strong>ComId1:</strong>
+                    <span style="margin-left:8px;">${comId1Value}</span>
+                </div>
+            `;
+        }
+
+        function R_isNewCase(timerValue) {
+            if (timerValue === R_lastTimerValue) { R_lastTimerValue = timerValue; return false; }
+            const [cm, cs] = timerValue.split(':').map(Number);
+            const [lm, ls] = R_lastTimerValue.split(':').map(Number);
+            const curr = (cm || 0) * 60 + (cs || 0), last = (lm || 0) * 60 + (ls || 0);
+            R_lastTimerValue = timerValue;
+            return curr > last && curr >= 1 && curr <= 10000;
+        }
+
+        function extractCaseDetails() {
+            // Build a label→canonicalKey lookup
+            const labelToKey = {};
+            R_fieldMap.forEach(f => f.labels.forEach(l => { labelToKey[l] = f.key; }));
+
+            const d = {};
+            document.querySelectorAll('.css-wncc9b').forEach(item => {
+                const rawKey = item.querySelector('.css-1wmy4xi')?.textContent.trim();
+                const v      = item.querySelector('.css-189kjnx')?.textContent.trim();
+                const canon  = labelToKey[rawKey];
+                // Only store first-found value per canonical key (don't overwrite)
+                if (canon && !d[canon]) d[canon] = v || 'N/A';
+            });
+            return d;
+        }
+
+        function findAddressId() {
+            for (const el of document.getElementsByClassName('css-wncc9b')) {
+                const k = el.querySelector('.css-1wmy4xi');
+                const v = el.querySelector('.css-189kjnx');
+                if (k?.textContent.trim() === 'AddressId') return v?.textContent.trim();
+            }
+            return null;
+        }
+
+        function R_isTaskPanelOpen() {
+            return !!document.querySelector(".css-14it2a2 .css-2lt2bb");
+        }
+
+        function processNewCase() {
+            if (R_isProcessing) return;
+            R_isProcessing = true;
+            const taskButtons = document.getElementsByClassName("css-14x4p4v");
+            if (taskButtons.length > 0) {
+                const wasClosed = !R_isTaskPanelOpen();
+                if (wasClosed) taskButtons[0].click();
+                setTimeout(() => {
+                    const caseDetails = extractCaseDetails();
+                    updateFloatingPanel(caseDetails);
+                    if (wasClosed) taskButtons[0].click();
+                    R_isProcessing = false;
+                }, 500);
+            } else {
+                R_isProcessing = false;
+            }
+        }
+
+        function checkAndUpdatePanel() {
+            const timerEl = document.querySelector(".css-laozi4 .css-2lt2bb");
+            if (timerEl) {
+                const tv = timerEl.textContent.trim();
+                if (R_isNewCase(tv)) { R_lastAddressId = null; processNewCase(); return; }
+            }
+            if (R_isTaskPanelOpen()) {
+                const addrId = findAddressId();
+                if (addrId && addrId !== R_lastAddressId) {
+                    R_lastAddressId = addrId;
+                    updateFloatingPanel(extractCaseDetails());
+                }
+            }
+        }
+
+        async function R_handlePasteToGeocode(rawValue) {
+            if (!rawValue || rawValue === 'N/A') return alert('No value found.');
+            const formatted = formatLatLon(rawValue);
+            try { await navigator.clipboard.writeText(formatted); } catch (e) {}
+            let input = document.getElementById('input-dp-geocode');
+            if (!input || input.offsetParent === null) {
+                const dlEl = Array.from(document.querySelectorAll('p.css-1oqpb4x'))
+                    .find(el => el.textContent.trim() === "Delivery Location");
+                if (dlEl) { dlEl.click(); await delay(500); input = document.getElementById('input-dp-geocode'); }
+            }
+            if (input) {
+                input.focus();
+                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+                if (setter) setter.call(input, formatted);
+                input.dispatchEvent(new Event('input',  { bubbles: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+            } else { alert("Failed to find or activate the DP Geocode input."); }
+        }
+
+        function openTrackingTab(trackingId, isContextMenu = false) {
+            const url = `https://logistics.amazon.com/internal/performance/daf-tool?pageId=da_focus_tool&tabId=tba-deliveries-daily-tab&timeFrame=Daily&to=2025-02-07&trackingId=${trackingId}`;
+            if (isContextMenu) {
+                if (!R_podSelectionTab || R_podSelectionTab.closed) R_podSelectionTab = window.open(url, 'r_podSelectionTab');
+                else { R_podSelectionTab.location.href = url; R_podSelectionTab.focus(); }
+            } else {
+                if (!R_podSearchTab || R_podSearchTab.closed) R_podSearchTab = window.open(url, 'r_podSearchTab');
+                else { R_podSearchTab.location.href = url; R_podSearchTab.focus(); }
+            }
+        }
+
+        document.addEventListener('contextmenu', e => {
+            const sel = window.getSelection()?.toString()?.trim();
+            if (sel && /^TBA[a-zA-Z0-9]+$/.test(sel)) { e.preventDefault(); openTrackingTab(sel, true); }
+        });
+
+        function startChecking() { checkAndUpdatePanel(); setTimeout(startChecking, 200); }
+        setTimeout(startChecking, 2000);
+        console.log("📋 POD floating panel (v6) loaded");
+    })();
+
+    /* ═══════════════════════════════════════════════
+       SECTION 8 — INIT EVERYTHING
+    ═══════════════════════════════════════════════ */
+    (async function initAll() {
+        await delay(500);
+
+        if (ENABLE_DFE_NEI)    { await delay(300); injectButtonsNearGeocode(); }
+if (ENABLE_AUTO_AUDIT) {
+    await setupAutoAuditListeners();
+}
+        if (IS_IFRAME)         { await setupGAMIssueAutoTransfer(); }
+
+        // Past Deliveries monitor runs in main window only
+        if (ENABLE_POD_PANEL)  { initPastDeliveriesMonitor(); }
+
+        console.log(
+            `🚀 PROPHESY FINAL v6.1 — iframe=${IS_IFRAME} | ` +
+            `DFE_NEI=${ENABLE_DFE_NEI} | AutoAudit=${ENABLE_AUTO_AUDIT} | ` +
+            `GAMListener=ON | PODPanel=${ENABLE_POD_PANEL} | PastDels=${ENABLE_POD_PANEL}`
+        );
+    })();
+
+})();
