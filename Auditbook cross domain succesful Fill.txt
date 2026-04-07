@@ -1,0 +1,158 @@
+// ==UserScript==
+// @name         AuditBook QC_CORE Auto-Fill
+// @namespace    http://tampermonkey.net/
+// @version      2.0.0
+// @description  Auto-reads case fields, sends to Geostudio via postMessage, fills default values
+// @author       QC_CORE
+// @match        https://auditbook-na.corp.amazon.com/audit*
+// @grant        none
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const GEOSTUDIO_URL = 'https://na.geostudio.last-mile.amazon.dev/place';
+  const GEOSTUDIO_ORIGIN = 'https://na.geostudio.last-mile.amazon.dev';
+
+  let geostudioTab = null;
+  let latestCaseData = null;
+
+  // ─── UTILITY: Get field value by label text ───────────────────────────────
+  function getFieldValue(labelText) {
+    const labels = document.querySelectorAll('label.a-form-label.a-span12');
+    for (const label of labels) {
+      if (label.innerText.trim() === labelText) {
+        const valueSpan = label.closest('.a-row, .a-column, .a-span12, div')
+          ?.querySelector('span.aok-break-word')
+          || label.parentElement?.nextElementSibling?.querySelector('span.aok-break-word')
+          || label.nextElementSibling;
+        if (valueSpan) return valueSpan.innerText.trim();
+      }
+    }
+    return null;
+  }
+
+  // ─── UTILITY: Set <select> value ─────────────────────────────────────────
+  function setSelect(id, value) {
+    const sel = document.getElementById(id);
+    if (!sel) return;
+    for (const opt of sel.options) {
+      if (opt.value === value || opt.text.trim() === value) {
+        sel.value = opt.value;
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        const popoverId = sel.closest('[data-a-popover-id]')?.getAttribute('data-a-popover-id')
+          || sel.closest('.a-button-dropdown')?.querySelector('[data-a-popover-id]')?.getAttribute('data-a-popover-id');
+        if (popoverId) {
+          document.querySelectorAll('#' + popoverId + ' a.a-dropdown-link').forEach(function (link) {
+            if (link.innerText.trim() === value) link.click();
+          });
+        }
+        break;
+      }
+    }
+  }
+
+  // ─── UTILITY: Set input value ─────────────────────────────────────────────
+  function setInput(id, value) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.value = value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  // ─── CORE: Read case fields ───────────────────────────────────────────────
+  function readCaseData() {
+    return {
+      type: 'QC_CORE_CASE',
+      addressId:  getFieldValue('AddressId'),
+      trackingId: getFieldValue('TrackingId'),
+      preDP:      getFieldValue('PreDP'),
+      preRE:      getFieldValue('PreRE'),
+      timestamp:  Date.now()
+    };
+  }
+
+  // ─── CORE: Send data to Geostudio tab ────────────────────────────────────
+  function sendToGeostudio(data) {
+    if (geostudioTab && !geostudioTab.closed) {
+      geostudioTab.postMessage(data, GEOSTUDIO_ORIGIN);
+      console.log('[QC_CORE] Case data sent to Geostudio:', data);
+    } else {
+      console.warn('[QC_CORE] Geostudio tab not open. Use the Sync button to open it.');
+    }
+  }
+
+  // ─── CORE: Auto-fill defaults ─────────────────────────────────────────────
+  function autoFillDefaults() {
+    setSelect('OUTPUT_Judgement', 'Auditor Correct');
+    setSelect('OUTPUT_CorrectAuditCode', 'NA');
+    setInput('OUTPUT_Remarks', ' ');
+    console.log('[QC_CORE] Default values filled.');
+  }
+
+  // ─── LISTENER: Receive messages from Geostudio ───────────────────────────
+  window.addEventListener('message', function (e) {
+    if (e.origin !== GEOSTUDIO_ORIGIN) return;
+    if (e.data === 'QC_CORE_READY') {
+      console.log('[QC_CORE] Geostudio is ready — sending latest case data.');
+      if (latestCaseData) sendToGeostudio(latestCaseData);
+    }
+  });
+
+  // ─── INJECT: Sync button ──────────────────────────────────────────────────
+  function injectSyncButton() {
+    if (document.getElementById('qc_sync_btn')) return;
+
+    const btn = document.createElement('button');
+    btn.id = 'qc_sync_btn';
+    btn.innerText = 'Open GeoStudio';
+    btn.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:999999;background:#4a90d9;color:#fff;border:none;border-radius:6px;padding:9px 16px;font-size:13px;font-weight:bold;cursor:pointer;font-family:monospace;box-shadow:0 2px 8px rgba(0,0,0,0.4);';
+
+    btn.addEventListener('click', function () {
+      if (geostudioTab && !geostudioTab.closed) {
+        geostudioTab.focus();
+      } else {
+        geostudioTab = window.open(GEOSTUDIO_URL, 'geostudio_qc_core');
+      }
+      btn.innerText = 'GeoStudio Open';
+      setTimeout(function () { btn.innerText = 'Open GeoStudio'; }, 3000);
+    });
+
+    document.body.appendChild(btn);
+  }
+
+  // ─── OBSERVER: Watch for new case load ────────────────────────────────────
+  function waitForCase() {
+    let lastTrackingId = null;
+
+    const observer = new MutationObserver(function () {
+      const tid = getFieldValue('TrackingId');
+      if (tid && tid !== lastTrackingId) {
+        lastTrackingId = tid;
+        console.log('[QC_CORE] New case detected:', tid);
+        setTimeout(function () {
+          latestCaseData = readCaseData();
+          autoFillDefaults();
+          sendToGeostudio(latestCaseData);
+        }, 500);
+      }
+    });
+
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    setTimeout(function () {
+      const tid = getFieldValue('TrackingId');
+      if (tid) {
+        lastTrackingId = tid;
+        latestCaseData = readCaseData();
+        autoFillDefaults();
+        sendToGeostudio(latestCaseData);
+      }
+      injectSyncButton();
+    }, 1500);
+  }
+
+  waitForCase();
+
+})();
