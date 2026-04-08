@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CDP Board in GeoStudio
 // @namespace    http://tampermonkey.net/
-// @version      4.2
+// @version      4.3
 // @description  Displays CDP from Attributes sources with auto-refresh on case load
 // @author       Nishan [nishanrh] Nishanur Rahman
 // @match        https://na.geostudio.last-mile.amazon.dev/*
@@ -416,7 +416,6 @@
         }
 
         const valueDiv = document.createElement('div');
-        valueDiv.textContent = displayValue;
         Object.assign(valueDiv.style, {
             fontSize: '14px',
             fontFamily: 'Amazon Ember, Helvetica, Arial, sans-serif',
@@ -426,41 +425,16 @@
             padding: '12px',
             backgroundColor: '#f7f8f8',
             borderRadius: '8px',
-            marginBottom: '8px'
+            marginBottom: '12px'
         });
 
-        cdpPanel.appendChild(valueDiv);
-
-        let sourceHtml = data.cdp.Source;
-        let tsHtml = data.cdp.Timestamp;
-
-        if (data.cdp.Source && data.cdp.Source.toUpperCase() === 'CUSTOMER') {
-            sourceHtml = `<span style="color: #d13212; font-weight: bold;">${data.cdp.Source}</span>`;
-            const tIndex = data.cdp.Timestamp.indexOf('T');
-            if (tIndex !== -1) {
-                const datePart = data.cdp.Timestamp.substring(0, tIndex);
-                const timePart = data.cdp.Timestamp.substring(tIndex);
-                tsHtml = `<span style="color: #d13212; font-weight: bold;">${datePart}</span><span style="color: #16191f;">${timePart}</span>`;
-            } else {
-                tsHtml = `<span style="color: #d13212; font-weight: bold;">${data.cdp.Timestamp}</span>`;
-            }
+        if (data.cdp.Type === 'Delivery Hint') {
+            valueDiv.innerHTML = displayValue.replace(/\n/g, '<br>');
+        } else {
+            valueDiv.textContent = displayValue;
         }
 
-        const metaDiv = document.createElement('div');
-        metaDiv.innerHTML = '<b>Source:</b> ' + sourceHtml + '<br><b>Timestamp:</b> ' + tsHtml;
-        Object.assign(metaDiv.style, {
-            fontSize: '13px',
-            fontFamily: 'Amazon Ember, Helvetica, Arial, sans-serif',
-            color: '#545b64',
-            lineHeight: '1.4',
-            marginBottom: '12px',
-            textAlign: 'center',
-            backgroundColor: 'rgba(255,255,255,0.7)',
-            padding: '6px',
-            borderRadius: '6px'
-        });
-        
-        cdpPanel.appendChild(metaDiv);
+        cdpPanel.appendChild(valueDiv);
 
         const analyticsBtn = document.createElement('button');
         analyticsBtn.textContent = 'Analytics';
@@ -763,7 +737,22 @@
             overflowWrap: 'break-word'
         });
 
-        entry.innerHTML = '<b>' + num + '.</b><br><b>Value:</b> ' + data.Value + '<br><b>Source:</b> ' + data.Source + '<br><b>Timestamp:</b> ' + data.Timestamp;
+        let sourceDisplay = data.Source;
+        let timestampDisplay = data.Timestamp;
+
+        if (data.Source && data.Source.toUpperCase() === 'CUSTOMER') {
+            sourceDisplay = `<span style="color: #d13212; font-weight: bold;">${data.Source}</span>`;
+            const tIdx = data.Timestamp ? data.Timestamp.indexOf('T') : -1;
+            if (tIdx !== -1) {
+                const dp = data.Timestamp.substring(0, tIdx);
+                const tp = data.Timestamp.substring(tIdx);
+                timestampDisplay = `<span style="color: #d13212; font-weight: bold;">${dp}</span><span style="color: #16191f;">${tp}</span>`;
+            } else {
+                timestampDisplay = `<span style="color: #d13212; font-weight: bold;">${data.Timestamp}</span>`;
+            }
+        }
+
+        entry.innerHTML = '<b>' + num + '.</b><br><b>Value:</b> ' + data.Value + '<br><b>Source:</b> ' + sourceDisplay + '<br><b>Timestamp:</b> ' + timestampDisplay;
 
         return entry;
     }
