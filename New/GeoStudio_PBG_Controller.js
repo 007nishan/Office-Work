@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         GeoStudio PBG Controller V13.5 (Complete)
+// @name         GeoStudio PBG Controller V13.6 (Complete)
 // @namespace    http://tampermonkey.net/
-// @version      13.5
+// @version      13.6
 // @description  Translucent Case Data Panel + Heartbeat + Full GAM DP Triage + UPID + Submit Protection
 // @author       nishanrh
 // @match        https://na.geostudio.last-mile.amazon.dev/*
@@ -246,7 +246,20 @@
         if (!btn) return null;
 
         btn.click();
-        await delay(1000); // wait for drawer to open
+        // Wait dynamically for elements to populate, max ~3 seconds
+        let itemsFound = false;
+        for (let i = 0; i < 15; i++) {
+          await delay(200);
+          if (document.querySelector(ITEM_SELECTOR)) {
+            itemsFound = true;
+            break;
+          }
+        }
+        if (!itemsFound) {
+            btn.click(); // close drawer
+            return null;
+        }
+        await delay(300); // extra breathing room for full render
 
         const details = {};
         document.querySelectorAll(ITEM_SELECTOR).forEach(item => {
@@ -416,12 +429,14 @@
               if (cid1 && cid1 !== '-' && cid1 !== 'N/A') {
                 openHeartbeatAndClickTranscript(cid1);
               }
+              /* Disable auto-click for Past Deliveries as requested
               if (trackingId && trackingId !== '-') {
                 // Short delay to ensure Heartbeat transmission completes before focusing Past Deliveries
                 setTimeout(() => {
                   openPastDeliveriesAndSearch(trackingId);
                 }, 800);
               }
+              */
               // =================================
             }
             isExtracting = false;
@@ -548,7 +563,7 @@
     // ── Constants ────────────────────────────────────────────
     const DPRE_QUEUES = ['RDR_DPRE_PIPELINE_NA_PID','RDR_DPRE_PIPELINE_NA','RDR_DPRE_PIPELINE_NA_EG','RDR_DPRE_PIPELINE_POM'];
     const PBG_QUEUES  = ['PBG_Hierarchy_Places_P0_L1','PBG_Hierarchy_Places_P2_L1'];
-    const UPID_QUEUE  = 'RDR_COMBINED_UPID_TRIAGE';
+    const UPID_QUEUE  = 'RDR_PROPHESY_UPID_TRIAGE';
 
     // ── State ────────────────────────────────────────────────
     let storedDPGeocode      = null;

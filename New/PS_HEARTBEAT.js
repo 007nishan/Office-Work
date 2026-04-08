@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PS_HEARTBEAT
 // @namespace    http://tampermonkey.net/
-// @version      3.3
+// @version      3.4
 // @description  Auto-setup, CommID search, dropdown hide+blur, feedback expand via SVG MouseEvent, global auto-copy, Left Ctrl trigger
 // @author       Nishan [nishanrh] Nishanur Rahman
 // @match        https://heartbeat.cs.amazon.dev/*
@@ -84,36 +84,40 @@
   // Polls every 300ms until SVG appears with non-zero dimensions
   // ============================================================
   function expandFeedbackMessage() {
-    console.log('PS_HEARTBEAT: Module C — SVG expand polling ACTIVE');
-    var attempts = 0;
-    var expanded = false;
-    var interval = setInterval(function () {
-      attempts++;
+    console.log('PS_HEARTBEAT: Module C — Persistent SVG Expand Monitor ACTIVE');
+    // We use a MutationObserver so that after every search in the same tab,
+    // the observer catches the new rows and guarantees expansion.
+    if (window._feedbackObserver) return; // run only once
+    
+    window._feedbackObserver = new MutationObserver(function() {
       var allSvgs = document.querySelectorAll('svg');
       for (var i = 0; i < allSvgs.length; i++) {
         var path = allSvgs[i].querySelector('path');
-        if (path && path.getAttribute('d') &&
-            path.getAttribute('d').indexOf('M2.004 16.593') !== -1) {
+        if (path && path.getAttribute('d') && path.getAttribute('d').indexOf('M2.004 16.593') !== -1) {
           var rect = allSvgs[i].getBoundingClientRect();
           if (rect.width > 0 && rect.height > 0) {
-            expanded = true;
-            clearInterval(interval);
-            allSvgs[i].dispatchEvent(new MouseEvent('click', {
-              bubbles: true, cancelable: true, view: window
-            }));
-            console.log('PS_HEARTBEAT [EXPAND]: SVG clicked at attempt', attempts);
-            return;
+            // Found the indicator. Let's verify it's not already expanded natively
+            var btn = allSvgs[i].closest('button, [role="button"]');
+            var isExpanded = btn ? btn.getAttribute('aria-expanded') === 'true' : false;
+            
+            // Also checking parent element in case button isn't explicitly defined with role
+            if (!isExpanded && allSvgs[i].parentElement) {
+                isExpanded = allSvgs[i].parentElement.getAttribute('aria-expanded') === 'true';
+            }
+
+            if (!isExpanded && !allSvgs[i]._psExpanded) {
+              allSvgs[i]._psExpanded = true; // Mark to prevent loop
+              allSvgs[i].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+              console.log('PS_HEARTBEAT [EXPAND]: State was collapsed --> Auto-Expanded');
+            }
           }
         }
       }
-      if (attempts % 20 === 0) {
-        console.log('PS_HEARTBEAT [EXPAND]: Waiting... attempt', attempts);
-      }
-      if (attempts >= 200) {
-        clearInterval(interval);
-        console.log('PS_HEARTBEAT [EXPAND]: Timed out');
-      }
-    }, 300);
+    });
+
+    window._feedbackObserver.observe(document.body, { 
+      childList: true, subtree: true, attributes: true, attributeFilter: ['aria-expanded', 'class'] 
+    });
   }
 
   // ============================================================
