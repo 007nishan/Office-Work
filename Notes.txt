@@ -1,8 +1,13 @@
-If we are selecting Upid Geocode Accuracy as No, triaging should be locked to third option in the triaging dropdown, i.e., RDR_PROPHESY_UPID_TRIAGE
+Value: {"Locations_":[{"*className*":"amazon.AddressAuthorityTypes.SafePlaceDelivery","SafePlaceLocation_":"FRONTDOOR"}]}
 
-This is not happening. GAM triaging is however working properly. Can you look into it. 
-Also, when we pull a case for the first time, only AID details gets updated in the Board, remaining details start showing up from next case onwards. Can you find out why?
+Whenever source is Customer for any Entry, Can you use Red Colour to display that SOurce Value and Corresponding Timestamp value.
 
-On heartbeat, Feedback message should be in an expanded state. Some times it is failing. Can you add a logic like if check for feedback message state if not in expanded state, expand it, so that feedback message expansion is ensured at for every search. 
+Also, Timestamp is of the format viz. 2026-03-29T14:47:27.481Z. I want you to colour red the only the date and leave remaining part[viz. T14:47:27.481Z] in Black itself for the condition mentioned above. 
 
-Also, drop the Tracking ID auto click for now. It is stopping other scripts already running. We shall integrate this feature once we unify all scripts into one. 
+Also, some text are overflowing out of the green highlight box. Please adjust the box so that there is no data outside of that.
+
+Also, if CDP is Preferred delivery location, on the CDP board you are displaying CDP as Preferred Delivery Location and it's corresponding value. This is okay, but, in the value display I only want you to display the data that is contained inside " " after : 
+Viz. if CDP Value is {"Locations_":[{"*className*":"amazon.AddressAuthorityTypes.SafePlaceDelivery","SafePlaceLocation_":"FRONTDOOR"}]}
+I only want you to display FRONTDOOR
+
+remaining is meta data - not useful for me.
