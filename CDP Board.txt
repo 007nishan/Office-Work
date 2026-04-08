@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CDP Board in GeoStudio
 // @namespace    http://tampermonkey.net/
-// @version      4.1
+// @version      4.2
 // @description  Displays CDP from Attributes sources with auto-refresh on case load
 // @author       Nishanur
 // @match        https://na.geostudio.last-mile.amazon.dev/*
@@ -667,7 +667,8 @@
         analyticsPanel.appendChild(dhTitle);
 
         data.dhData.forEach((dh, idx) => {
-            const entry = createAnalyticsEntry(idx + 1, dh);
+            const isWinner = data.cdp && data.cdp.Type === 'Delivery Hint' && data.cdp.Timestamp === dh.Timestamp && data.cdp.Source === dh.Source;
+            const entry = createAnalyticsEntry(idx + 1, dh, isWinner);
             analyticsPanel.appendChild(entry);
         });
 
@@ -683,7 +684,8 @@
         analyticsPanel.appendChild(pdlTitle);
 
         data.pdlData.forEach((pdl, idx) => {
-            const entry = createAnalyticsEntry(idx + 1, pdl);
+            const isWinner = data.cdp && data.cdp.Type === 'Preferred Delivery Location' && data.cdp.Timestamp === pdl.Timestamp && data.cdp.Source === pdl.Source;
+            const entry = createAnalyticsEntry(idx + 1, pdl, isWinner);
             analyticsPanel.appendChild(entry);
         });
 
@@ -706,19 +708,20 @@
         document.body.appendChild(analyticsPanel);
     }
 
-    function createAnalyticsEntry(num, data) {
+    function createAnalyticsEntry(num, data, isWinner = false) {
         const entry = document.createElement('div');
         Object.assign(entry.style, {
             padding: '12px',
             marginBottom: '8px',
-            backgroundColor: '#f7f8f8',
+            backgroundColor: isWinner ? '#e6f4ea' : '#f7f8f8',
+            border: isWinner ? '2px solid #34a853' : 'none',
             borderRadius: '8px',
             fontSize: '14px',
             lineHeight: '1.5',
             color: '#16191f'
         });
 
-        entry.innerHTML = '<b>' + num + '.</b> <b>Value:</b> ' + data.Value.substring(0, 100) + '... <b>Source:</b> ' + data.Source + ' <b>Timestamp:</b> ' + data.Timestamp;
+        entry.innerHTML = '<b>' + num + '.</b><br><b>Value:</b> ' + data.Value + '<br><b>Source:</b> ' + data.Source + '<br><b>Timestamp:</b> ' + data.Timestamp;
 
         return entry;
     }
@@ -745,79 +748,46 @@
         }
     });
 
-    let debounceTimer = null;
+    let lastCheckTime = 0;
 
-    function checkMutation(m) {
-        if (m.target.textContent?.includes('Address ID:')) {
-            if (debounceTimer) clearTimeout(debounceTimer);
-
-            debounceTimer = setTimeout(async () => {
+    function monitorCases() {
+        setInterval(async () => {
+            const now = Date.now();
+            if (now - lastCheckTime >= 500) {
+                lastCheckTime = now;
                 const currentAid = getAddressId();
 
-                if (!currentAid) {
-                    console.log('No Address ID found');
-                    return;
-                }
+                if (currentAid && currentAid !== lastProcessedAddressId && !isExtracting) {
+                    console.log('New case detected: ' + currentAid + ' (previous: ' + lastProcessedAddressId + ')');
+                    lastProcessedAddressId = currentAid;
 
-                if (currentAid === lastProcessedAddressId) {
-                    console.log('Same Address ID (' + currentAid + '), skipping extraction');
-                    return;
-                }
-
-                console.log('New case detected: ' + currentAid + ' (previous: ' + lastProcessedAddressId + ')');
-                lastProcessedAddressId = currentAid;
-
-                if (cdpPanel) {
-                    while (cdpPanel.childNodes.length > 0) {
-                        cdpPanel.removeChild(cdpPanel.lastChild);
+                    if (cdpPanel) {
+                        while (cdpPanel.childNodes.length > 0) {
+                            cdpPanel.removeChild(cdpPanel.lastChild);
+                        }
+                        const loading = document.createElement('div');
+                        loading.textContent = 'Loading...';
+                        Object.assign(loading.style, {
+                            fontSize: '14px',
+                            fontFamily: 'Amazon Ember, Helvetica, Arial, sans-serif',
+                            textAlign: 'center',
+                            color: '#545b64',
+                            marginTop: '24px'
+                        });
+                        cdpPanel.appendChild(loading);
                     }
-                    const loading = document.createElement('div');
-                    loading.textContent = 'Loading...';
-                    Object.assign(loading.style, {
-                        fontSize: '14px',
-                        fontFamily: 'Amazon Ember, Helvetica, Arial, sans-serif',
-                        textAlign: 'center',
-                        color: '#545b64',
-                        marginTop: '24px'
-                    });
-                    cdpPanel.appendChild(loading);
+
+                    const data = await extractCDPData();
+                    cachedData = data;
+                    updateCDPBoardContent(data);
                 }
-
-                const data = await extractCDPData();
-                cachedData = data;
-                updateCDPBoardContent(data);
-            }, CONFIG.DEBOUNCE_DELAY);
-
-            return true;
-        }
-        return false;
+            }
+        }, 500);
     }
-
-    const observer = new MutationObserver((mutations) => {
-        for (const m of mutations) {
-            if (checkMutation(m)) break;
-        }
-    });
 
     function init() {
         createCDPBoard();
-
-        observer.observe(document.body, {
-            childList: true,
-            subtree: true,
-            attributes: true
-        });
-
-        setTimeout(async () => {
-            const aid = getAddressId();
-            if (aid) {
-                console.log('Initial case: ' + aid);
-                lastProcessedAddressId = aid;
-                const data = await extractCDPData();
-                cachedData = data;
-                updateCDPBoardContent(data);
-            }
-        }, CONFIG.INITIAL_CASE_CHECK_DELAY);
+        monitorCases();
     }
 
     init();
