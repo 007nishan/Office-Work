@@ -1,0 +1,551 @@
+// ==UserScript==
+// @name        POD Comparison Automation
+// @namespace   http://tampermonkey.net/
+// @version     4.0
+// @description Increased POD size + Working iframe paste with setNativeValue
+// @author      Nishanur
+// @match       https://na.geostudio.last-mile.amazon.dev/*
+// @match       https://eu.geostudio.last-mile.amazon.dev/*
+// @match       https://fe.geostudio.last-mile.amazon.dev/*
+// @grant       GM_setValue
+// @grant       GM_getValue
+// @run-at      document-end
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    if (window.podComparisonLoaded) return;
+    window.podComparisonLoaded = true;
+
+    let isPaused = false;
+    let cycleInterval = null;
+    let currentGreenIndex = 0;
+    let deliveryData = null;
+    let top10Green = [];
+    let currentGreenTBA = '';
+    let startButton = null;
+    let overlayOpen = false;
+    window.CLIPBOARD_CACHE = '';
+
+    function setNativeValue(el, value) {
+        if (!el) return;
+        try {
+            var desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+            if (desc && desc.set) {
+                desc.set.call(el, value);
+            } else {
+                el.value = value;
+            }
+        } catch (e) {
+            el.value = value;
+        }
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    function getTrackingIdFromTaskDetails() {
+        const trackingIdElements = Array.from(document.querySelectorAll('p, span, div, label')).filter(el =>
+            el.textContent.includes('TrackingId')
+        );
+
+        if (trackingIdElements.length > 0) {
+            const text = trackingIdElements.at(0).textContent;
+            const tbaMatch = text.match(/TBA\d+/);
+            if (tbaMatch) {
+                console.log('Extracted TrackingId: ' + tbaMatch.at(0));
+                return tbaMatch.at(0);
+            }
+        }
+        console.log('TrackingId not found');
+        return null;
+    }
+
+    function detectPODs() {
+        const allBTags = document.querySelectorAll('b');
+        const deliveries = [];
+
+        for (let i = 0; i < allBTags.length; i++) {
+            const bTag = allBTags.item(i);
+            const serialNumber = bTag.textContent.trim();
+            if (!serialNumber || isNaN(serialNumber)) continue;
+
+            let currentDiv = bTag.parentElement;
+            let attempts = 0;
+
+            while (currentDiv && attempts < 15) {
+                attempts++;
+                const divText = currentDiv.textContent;
+
+                if (divText.includes('Place Id |') && divText.includes('Reason |')) {
+                    const tbaMatch = divText.match(/TBA\d+/);
+                    if (!tbaMatch) {
+                        currentDiv = currentDiv.parentElement;
+                        continue;
+                    }
+
+                    const tba = tbaMatch.at(0);
+                    const placeIdMatch = divText.match(/Place Id \|\s*(\d+)/);
+                    const placeId = placeIdMatch ? placeIdMatch.at(1) : 'Unknown';
+
+                    const defectMatch = divText.match(/Defect \|\s*([^]+)/);
+                    let defectType = 'None';
+                    let buttonColor = 'GREEN';
+
+                    if (defectMatch && defectMatch.at(1)) {
+                        const defectText = defectMatch.at(1).trim();
+                        const firstDefect = defectText.split(',').at(0).trim();
+                        if (firstDefect === 'SONORUS_LATE_DELIVERY') {
+                            defectType = 'SONORUS_LATE_DELIVERY';
+                            buttonColor = 'GREEN';
+                        } else {
+                            defectType = firstDefect;
+                            buttonColor = 'RED';
+                        }
+                    }
+
+                    const buttons = currentDiv.querySelectorAll('button');
+                    let hasPOD = false;
+                    for (let j = 0; j < buttons.length; j++) {
+                        const btn = buttons.item(j);
+                        const svg = btn.querySelector('svg');
+                        if (svg && svg.getAttribute('data-testid') === 'CameraAltIcon') {
+                            hasPOD = true;
+                            break;
+                        }
+                    }
+
+                    deliveries.push({
+                        serialNumber: serialNumber,
+                        tba: tba,
+                        placeId: placeId,
+                        defectType: defectType,
+                        buttonColor: buttonColor,
+                        hasPOD: hasPOD
+                    });
+                    break;
+                }
+                currentDiv = currentDiv.parentElement;
+            }
+        }
+
+        window.DELIVERY_DATA = deliveries;
+        return deliveries;
+    }
+
+    function findAndClickPOD(delivery) {
+        const allBTags = document.querySelectorAll('b');
+        for (let i = 0; i < allBTags.length; i++) {
+            const bTag = allBTags.item(i);
+            if (bTag.textContent.trim() !== delivery.serialNumber) continue;
+
+            let currentDiv = bTag.parentElement;
+            let attempts = 0;
+            while (currentDiv && attempts < 15) {
+                attempts++;
+                const divText = currentDiv.textContent;
+                if (divText.includes(delivery.tba) && divText.includes('Place Id |')) {
+                    const buttons = currentDiv.querySelectorAll('button');
+                    for (let j = 0; j < buttons.length; j++) {
+                        const btn = buttons.item(j);
+                        const svg = btn.querySelector('svg');
+                        if (svg && svg.getAttribute('data-testid') === 'CameraAltIcon') {
+                            btn.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+                currentDiv = currentDiv.parentElement;
+            }
+        }
+        return false;
+    }
+
+    function highlightTBAInPastDeliveries(tba) {
+        document.querySelectorAll('.pbg-delivery-highlight').forEach(el =>
+            el.classList.remove('pbg-delivery-highlight')
+        );
+
+        const allBTags = document.querySelectorAll('b');
+        for (let i = 0; i < allBTags.length; i++) {
+            const bTag = allBTags.item(i);
+            const serialNumber = bTag.textContent.trim();
+            if (!serialNumber || isNaN(serialNumber)) continue;
+
+            let currentDiv = bTag.parentElement;
+            let attempts = 0;
+            let foundRow = null;
+
+            while (currentDiv && attempts < 15) {
+                attempts++;
+                const divText = currentDiv.textContent;
+
+                const tbaMatches = divText.match(/TBA\d+/g);
+                if (tbaMatches && tbaMatches.length === 1 && tbaMatches.at(0) === tba) {
+                    if (divText.includes('Place Id |') && divText.includes('Reason |')) {
+                        foundRow = currentDiv;
+                        break;
+                    }
+                }
+                currentDiv = currentDiv.parentElement;
+            }
+
+            if (foundRow) {
+                foundRow.classList.add('pbg-delivery-highlight');
+                foundRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                console.log('Highlighted TBA: ' + tba);
+                return true;
+            }
+        }
+        console.log('TBA not found for highlighting: ' + tba);
+        return false;
+    }
+
+    function enablePersistentSmartPaste() {
+        document.addEventListener('click', function(e) {
+            const target = e.target;
+
+            if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
+                navigator.clipboard.readText().then(function(clipboardText) {
+                    if (!clipboardText) return;
+                    window.CLIPBOARD_CACHE = clipboardText;
+
+                    setTimeout(function() {
+                        if (document.activeElement === target) {
+                            setNativeValue(target, clipboardText);
+                            console.log('[Main Page] Auto-pasted: ' + clipboardText);
+                        }
+                    }, 100);
+                }).catch(function(err) {
+                    console.log('[Main Page] Clipboard read failed: ' + err);
+                });
+            }
+        }, true);
+
+        const checkIframes = setInterval(function() {
+            const iframes = document.querySelectorAll('iframe');
+            for (let i = 0; i < iframes.length; i++) {
+                const iframe = iframes.item(i);
+                if (!iframe.pbgSmartPasteEnabled) {
+                    iframe.pbgSmartPasteEnabled = true;
+
+                    try {
+                        iframe.contentDocument.addEventListener('click', function(e) {
+                            const target = e.target;
+                            if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
+                                setTimeout(function() {
+                                    if (window.CLIPBOARD_CACHE && iframe.contentDocument.activeElement === target) {
+                                        setNativeValue(target, window.CLIPBOARD_CACHE);
+                                        console.log('[Iframe] Auto-pasted: ' + window.CLIPBOARD_CACHE);
+                                    }
+                                }, 100);
+                            }
+                        }, true);
+
+                        console.log('[Iframe] Smart Paste enabled');
+                    } catch (e) {
+                        console.log('[Iframe] Cross-origin - cannot access');
+                    }
+                }
+            }
+        }, 2000);
+
+        console.log('[Main Page] Smart Paste enabled');
+    }
+
+    function closeOverlay() {
+        const overlay = document.getElementById('redPodOverlay');
+        if (overlay) {
+            if (cycleInterval) clearTimeout(cycleInterval);
+            overlay.remove();
+            overlayOpen = false;
+        }
+    }
+
+    function makeDraggable(element) {
+        let pos1 = 0, pos2 = 0, pos3 = 0, pos4 = 0;
+
+        element.style.cursor = 'move';
+        element.addEventListener('mousedown', dragMouseDown);
+
+        function dragMouseDown(e) {
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') {
+                return;
+            }
+            e.preventDefault();
+            pos3 = e.clientX;
+            pos4 = e.clientY;
+            document.addEventListener('mouseup', closeDragElement);
+            document.addEventListener('mousemove', elementDrag);
+        }
+
+        function elementDrag(e) {
+            e.preventDefault();
+            pos1 = pos3 - e.clientX;
+            pos2 = pos4 - e.clientY;
+            pos3 = e.clientX;
+            pos4 = e.clientY;
+            element.style.top = (element.offsetTop - pos2) + 'px';
+            element.style.left = (element.offsetLeft - pos1) + 'px';
+            element.style.right = 'auto';
+        }
+
+        function closeDragElement() {
+            document.removeEventListener('mouseup', closeDragElement);
+            document.removeEventListener('mousemove', elementDrag);
+
+            if (typeof GM_setValue !== 'undefined') {
+                GM_setValue('overlayTop', element.style.top);
+                GM_setValue('overlayLeft', element.style.left);
+            }
+        }
+    }
+
+    function createOverlay(fixedRed) {
+        const overlay = document.createElement('div');
+        overlay.id = 'redPodOverlay';
+
+        let savedTop = '0px';
+        let savedLeft = 'auto';
+        let savedRight = '0px';
+
+        if (typeof GM_getValue !== 'undefined') {
+            savedTop = GM_getValue('overlayTop', '0px');
+            savedLeft = GM_getValue('overlayLeft', 'auto');
+            if (savedLeft !== 'auto') {
+                savedRight = 'auto';
+            }
+        }
+
+        overlay.style.cssText = 'position:fixed;top:' + savedTop + ';left:' + savedLeft + ';right:' + savedRight + ';width:auto;max-width:90%;height:auto;background:rgba(255,255,255,0.5);z-index:1000;padding:15px;overflow-y:auto;backdrop-filter:blur(6px);display:flex;flex-direction:column;';
+
+        const header = document.createElement('div');
+        header.style.cssText = 'color:#000;font-size:16px;font-weight:bold;margin-bottom:10px;padding:8px;border-bottom:1px solid #ccc;background:rgba(255,255,255,0.3);border-radius:4px;';
+        header.innerHTML = '<span style="color:#000;">Vended TID:</span> ' + fixedRed.tba + '<br><span style="font-size:12px;color:#333;">PlaceId: ' + fixedRed.placeId + '</span><br><span style="font-size:12px;color:#333;">Defect: ' + fixedRed.defectType + '</span>';
+        overlay.appendChild(header);
+
+        const manualTidContainer = document.createElement('div');
+        manualTidContainer.style.cssText = 'margin-bottom:10px;padding:8px;background:rgba(255,255,255,0.8);border-radius:8px;border:1px solid #ccc;';
+
+        const manualTidLabel = document.createElement('label');
+        manualTidLabel.textContent = 'Manual TID Entry:';
+        manualTidLabel.style.cssText = 'display:block;color:#000;font-weight:bold;margin-bottom:4px;font-size:12px;';
+        manualTidContainer.appendChild(manualTidLabel);
+
+        const manualTidInput = document.createElement('input');
+        manualTidInput.type = 'text';
+        manualTidInput.placeholder = 'Enter TBA number';
+        manualTidInput.style.cssText = 'width:calc(100% - 70px);padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px;';
+        manualTidContainer.appendChild(manualTidInput);
+
+        const loadManualBtn = document.createElement('button');
+        loadManualBtn.textContent = 'Load';
+        loadManualBtn.style.cssText = 'margin-left:4px;padding:6px 12px;background:#fff;color:#000;border:1px solid #ccc;border-radius:4px;cursor:pointer;font-size:12px;font-weight:bold;';
+        loadManualBtn.addEventListener('mouseenter', function() { loadManualBtn.style.backgroundColor = '#ffff00'; });
+        loadManualBtn.addEventListener('mouseleave', function() { loadManualBtn.style.backgroundColor = '#fff'; });
+        loadManualBtn.addEventListener('click', function() {
+            const manualTid = manualTidInput.value.trim();
+            if (!manualTid) return;
+
+            const manualDelivery = deliveryData.find(d => d.tba === manualTid && d.hasPOD);
+            if (manualDelivery) {
+                findAndClickPOD(manualDelivery);
+                setTimeout(function() {
+                    const podImages = document.querySelectorAll('div[style*="background-image"]');
+                    for (let i = 0; i < podImages.length; i++) {
+                        const bgImage = podImages.item(i).style.backgroundImage;
+                        if (bgImage && bgImage.includes('url')) {
+                            const imageUrl = bgImage.match(/url\(["']?([^"')]+)["']?\)/);
+                            if (imageUrl && imageUrl.at(1)) {
+                                document.getElementById('redPodImageContainer').innerHTML = '<img src="' + imageUrl.at(1) + '" style="width:100%;height:auto;max-height:2000px;object-fit:contain;border-radius:8px;">';
+                                header.innerHTML = '<span style="color:#000;">Vended TID:</span> ' + manualDelivery.tba + '<br><span style="font-size:12px;color:#333;">PlaceId: ' + manualDelivery.placeId + '</span><br><span style="font-size:12px;color:#333;">Defect: ' + manualDelivery.defectType + '</span>';
+                                break;
+                            }
+                        }
+                    }
+                }, 3000);
+            } else {
+                alert('TID not found in Past Deliveries or no POD available');
+            }
+        });
+        manualTidContainer.appendChild(loadManualBtn);
+        overlay.appendChild(manualTidContainer);
+
+        const greenDisplay = document.createElement('div');
+        greenDisplay.style.cssText = 'color:#000;font-size:14px;margin-bottom:10px;padding:8px;background:rgba(255,255,255,0.8);border-radius:8px;border:1px solid #ccc;';
+        greenDisplay.innerHTML = '<span style="color:#000;font-weight:bold;">Valid POD:</span> <span id="currentGreenTba">-</span>';
+        overlay.appendChild(greenDisplay);
+
+        const btnContainer = document.createElement('div');
+        btnContainer.style.cssText = 'display:flex;gap:8px;margin-bottom:10px;';
+
+        const lockBtn = document.createElement('button');
+        lockBtn.textContent = 'Lock';
+        lockBtn.style.cssText = 'flex:1;padding:8px 16px;background:#fff;color:#000;border:1px solid #ccc;border-radius:4px;cursor:pointer;font-size:12px;font-weight:bold;';
+        lockBtn.addEventListener('mouseenter', function() { lockBtn.style.backgroundColor = '#ffff00'; });
+        lockBtn.addEventListener('mouseleave', function() { lockBtn.style.backgroundColor = '#fff'; });
+        lockBtn.addEventListener('click', function() {
+            if (currentGreenTBA) {
+                const copyText = 'Reference TID ' + currentGreenTBA;
+                navigator.clipboard.writeText(copyText).then(function() {
+                    window.CLIPBOARD_CACHE = copyText;
+                    highlightTBAInPastDeliveries(currentGreenTBA);
+                    closeOverlay();
+                });
+            }
+        });
+        btnContainer.appendChild(lockBtn);
+
+        const holdBtn = document.createElement('button');
+        holdBtn.textContent = 'Hold';
+        holdBtn.style.cssText = 'flex:1;padding:8px 16px;background:#fff;color:#000;border:1px solid #ccc;border-radius:4px;cursor:pointer;font-size:12px;font-weight:bold;';
+        holdBtn.addEventListener('mouseenter', function() { holdBtn.style.backgroundColor = '#ffff00'; });
+        holdBtn.addEventListener('mouseleave', function() { if (!isPaused) holdBtn.style.backgroundColor = '#fff'; });
+        holdBtn.addEventListener('click', function() {
+            isPaused = !isPaused;
+            if (isPaused) {
+                holdBtn.textContent = 'Resume';
+                holdBtn.style.backgroundColor = '#ffff00';
+                if (cycleInterval) clearTimeout(cycleInterval);
+            } else {
+                holdBtn.textContent = 'Hold';
+                holdBtn.style.backgroundColor = '#fff';
+                openNextGreen();
+            }
+        });
+        btnContainer.appendChild(holdBtn);
+
+        const closeBtn = document.createElement('button');
+        closeBtn.textContent = 'Close';
+        closeBtn.style.cssText = 'flex:1;padding:8px 16px;background:#fff;color:#000;border:1px solid #ccc;border-radius:4px;cursor:pointer;font-size:12px;font-weight:bold;';
+        closeBtn.addEventListener('mouseenter', function() { closeBtn.style.backgroundColor = '#ffff00'; });
+        closeBtn.addEventListener('mouseleave', function() { closeBtn.style.backgroundColor = '#fff'; });
+        closeBtn.addEventListener('click', closeOverlay);
+        btnContainer.appendChild(closeBtn);
+
+        overlay.appendChild(btnContainer);
+
+        const podContainer = document.createElement('div');
+        podContainer.id = 'redPodImageContainer';
+        podContainer.style.cssText = 'width:100%;background:#fff;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#333;';
+        podContainer.innerHTML = '<p style="padding:20px;">Loading Vended TID POD...</p>';
+        overlay.appendChild(podContainer);
+
+        makeDraggable(overlay);
+        overlayOpen = true;
+        return overlay;
+    }
+
+    function openNextGreen() {
+        if (isPaused) return;
+        if (currentGreenIndex >= top10Green.length) {
+            document.getElementById('currentGreenTba').textContent = 'Cycle Complete';
+            return;
+        }
+
+        const greenDelivery = top10Green.at(currentGreenIndex);
+        currentGreenTBA = greenDelivery.tba;
+        document.getElementById('currentGreenTba').textContent = currentGreenTBA;
+        findAndClickPOD(greenDelivery);
+        currentGreenIndex++;
+        cycleInterval = setTimeout(openNextGreen, 3000);
+    }
+
+    function startComparison() {
+        deliveryData = detectPODs();
+        const greenDeliveries = deliveryData.filter(d => d.buttonColor === 'GREEN' && d.hasPOD);
+        const targetTrackingId = getTrackingIdFromTaskDetails();
+
+        let fixedRed = null;
+        if (targetTrackingId) {
+            fixedRed = deliveryData.find(d => d.tba === targetTrackingId && d.hasPOD);
+        }
+
+        if (!fixedRed) {
+            const redDeliveries = deliveryData.filter(d => d.buttonColor === 'RED' && d.hasPOD);
+            fixedRed = redDeliveries.at(0);
+        }
+
+        if (!fixedRed) {
+            alert('ERROR: No deliveries with POD found.');
+            return;
+        }
+
+        top10Green = greenDeliveries.slice(0, 10);
+        currentGreenIndex = 0;
+        isPaused = false;
+
+        const overlay = createOverlay(fixedRed);
+        document.body.appendChild(overlay);
+        findAndClickPOD(fixedRed);
+
+        setTimeout(function() {
+            const podImages = document.querySelectorAll('div[style*="background-image"]');
+            for (let i = 0; i < podImages.length; i++) {
+                const bgImage = podImages.item(i).style.backgroundImage;
+                if (bgImage && bgImage.includes('url')) {
+                    const imageUrl = bgImage.match(/url\(["']?([^"')]+)["']?\)/);
+                    if (imageUrl && imageUrl.at(1)) {
+                        document.getElementById('redPodImageContainer').innerHTML = '<img src="' + imageUrl.at(1) + '" style="width:100%;height:auto;max-height:2000px;object-fit:contain;border-radius:8px;">';
+                        break;
+                    }
+                }
+            }
+            setTimeout(openNextGreen, 1000);
+        }, 3000);
+    }
+
+    function createStartButton() {
+        startButton = document.createElement('button');
+        startButton.textContent = 'Start POD';
+        startButton.style.cssText = 'position:fixed;top:10px;right:10px;padding:10px 20px;background:#fff;color:#000;border:1px solid #ccc;border-radius:4px;cursor:pointer;font-size:14px;font-weight:bold;z-index:99999;box-shadow:0 4px 12px rgba(0,0,0,0.1);';
+        startButton.addEventListener('mouseenter', function() { startButton.style.backgroundColor = '#ffff00'; });
+        startButton.addEventListener('mouseleave', function() { startButton.style.backgroundColor = '#fff'; });
+        startButton.addEventListener('click', startComparison);
+        document.body.appendChild(startButton);
+    }
+
+    function injectHighlightStyles() {
+        const style = document.createElement('style');
+        style.textContent = '.pbg-delivery-highlight { background: #fef8f0 !important; border: 2px solid #f2ab00 !important; border-radius: 4px !important; animation: pbgPulse 1.5s ease-in-out 3; box-shadow: 0 2px 8px rgba(242,171,0,.35) !important; padding: 6px !important; } @keyframes pbgPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } } .image-viewer-fullscreen { width: 90vw !important; height: 85vh !important; } .fullscreen-content { width: 90vw !important; height: 85vh !important; }';
+        document.head.appendChild(style);
+    }
+
+    document.addEventListener('keydown', function(e) {
+        if (e.key.toLowerCase() === 'z') {
+            if (overlayOpen) {
+                if (currentGreenTBA) {
+                    const copyText = 'Reference TID ' + currentGreenTBA;
+                    navigator.clipboard.writeText(copyText).then(function() {
+                        window.CLIPBOARD_CACHE = copyText;
+                        highlightTBAInPastDeliveries(currentGreenTBA);
+                        closeOverlay();
+                    });
+                } else {
+                    closeOverlay();
+                }
+            } else {
+                startComparison();
+            }
+        }
+        if (e.key === 'Shift' && e.location === 1) {
+            if (startButton) {
+                startButton.style.display = startButton.style.display === 'none' ? 'block' : 'none';
+            }
+        }
+    });
+
+    function init() {
+        injectHighlightStyles();
+        enablePersistentSmartPaste();
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', function() { setTimeout(createStartButton, 500); });
+        } else {
+            setTimeout(createStartButton, 500);
+        }
+    }
+
+    init();
+})();

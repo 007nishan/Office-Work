@@ -1,0 +1,8 @@
+If we are selecting Upid Geocode Accuracy as No, triaging should be locked to third option in the triaging dropdown, i.e., RDR_PROPHESY_UPID_TRIAGE
+
+This is not happening. GAM triaging is however working properly. Can you look into it. 
+Also, when we pull a case for the first time, only AID details gets updated in the Board, remaining details start showing up from next case onwards. Can you find out why?
+
+On heartbeat, Feedback message should be in an expanded state. Some times it is failing. Can you add a logic like if check for feedback message state if not in expanded state, expand it, so that feedback message expansion is ensured at for every search. 
+
+Also, drop the Tracking ID auto click for now. It is stopping other scripts already running. We shall integrate this feature once we unify all scripts into one. 
