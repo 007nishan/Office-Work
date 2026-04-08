@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         GeoStudio PBG Controller V13.4 (Complete)
+// @name         GeoStudio PBG Controller V13.5 (Complete)
 // @namespace    http://tampermonkey.net/
-// @version      13.4
+// @version      13.5
 // @description  Translucent Case Data Panel + Heartbeat + Full GAM DP Triage + UPID + Submit Protection
 // @author       nishanrh
 // @match        https://na.geostudio.last-mile.amazon.dev/*
@@ -405,7 +405,25 @@
           lastAddressId = aid;
           isExtracting  = true;
           extractCaseDetailsFromDrawer().then(details => {
-            if (details) updateCasePanel(details);
+            if (details) {
+              updateCasePanel(details);
+              
+              // === AUTOPILOT NEW CASE LOGIC ===
+              // Auto-trigger Heartbeat for CID_1 and then search Past Deliveries for TID
+              const cid1 = details['ComId1'];
+              const trackingId = details['TrackingId'] || details['TRACKING_ID'];
+              
+              if (cid1 && cid1 !== '-' && cid1 !== 'N/A') {
+                openHeartbeatAndClickTranscript(cid1);
+              }
+              if (trackingId && trackingId !== '-') {
+                // Short delay to ensure Heartbeat transmission completes before focusing Past Deliveries
+                setTimeout(() => {
+                  openPastDeliveriesAndSearch(trackingId);
+                }, 800);
+              }
+              // =================================
+            }
             isExtracting = false;
           }).catch(() => { isExtracting = false; });
         }
