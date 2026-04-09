@@ -75,21 +75,117 @@ document.addEventListener('DOMContentLoaded', () => {
         ]
     };
 
+    let tribunalData = {
+        nodes: [
+            // --- Entry ---
+            { id: "t1",  x: 800,  y: 80,   text: "<div class='node-content'><span class='step-label'>Step 1</span><strong class='primary-action'>User Opens App</strong><span class='instruction-text'>Navigates to the site. If not logged in, redirected to /login automatically.</span></div>" },
+            { id: "t2",  x: 800,  y: 260,  text: "<div class='node-content'><span class='step-label'>Step 2</span><strong class='primary-action'>Select Role & Login</strong><span class='instruction-text'>User selects their account (Auditor, QC, Auditor_POC, QC_POC, Appellate, Ops, Training) from the login page.</span></div>" },
+            { id: "t3",  x: 800,  y: 440,  text: "<div class='node-content'><span class='step-label'>Step 3</span><strong class='primary-action'>Dashboard Loaded</strong><span class='instruction-text'>All existing Disputes are displayed. User can view open cases or create a new dispute.</span></div>" },
+
+            // --- Dispute Creation Branch ---
+            { id: "t4",  x: 300,  y: 640,  text: "<div class='node-content'><span class='step-label'>Branch A</span><strong class='primary-action'>Create New Dispute</strong><span class='instruction-text'>User fills in logic & reference evidence, then submits the form via POST /create_dispute.</span></div>" },
+            { id: "t5",  x: 300,  y: 820,  text: "<div class='node-content'><span class='step-label'>Result</span><strong class='primary-action'>Dispute Created</strong><span class='instruction-text'>System auto-links to the active AuditCase. Status: <em>Pending Auditor Revert</em>. ⏱️ Auditor is notified — 24-hr SLA clock starts now.</span></div>" },
+
+            // --- Open Dispute Branch ---
+            { id: "t6",  x: 1300, y: 640,  text: "<div class='node-content'><span class='step-label'>Branch B</span><strong class='primary-action'>Open Existing Dispute</strong><span class='instruction-text'>User clicks a dispute from the dashboard to navigate to /dispute/{id}. Arguments & Geode entries loaded.</span></div>" },
+
+            // --- Auditor's Argument ---
+            { id: "t7",  x: 800,  y: 1020, text: "<div class='node-content'><span class='step-label'>Step 4 — Auditor</span><strong class='primary-action'>Auditor Submits Argument</strong><span class='instruction-text'>Auditor responds to QC fault within the 24-hr SLA window. Writes logic statement and optional quoted reference.</span></div>" },
+
+            // ══════════════════════════════════════════
+            // --- MANAGER APPROVAL GATE ---
+            // ══════════════════════════════════════════
+            { id: "t17", x: 800,  y: 1220, text: "<div class='node-content'><span class='step-label'>Step 5 — Gate</span><strong class='primary-action'>🔒 Manager Approval Required</strong><span class='instruction-text'>Argument is held pending. ⏱️ Manager is notified — 24-hr SLA to approve or disapprove. Decision must include a written reason.</span></div>" },
+            { id: "t18", x: 400,  y: 1440, text: "<div class='node-content'><span class='step-label'>Decision: Approve</span><strong class='primary-action'>✅ Manager Approves</strong><span class='instruction-text'>Manager provides mandatory written reason for approval. Argument forwarded to QC. ⏱️ QC's 24-hr SLA starts now.</span></div>" },
+            { id: "t19", x: 1200, y: 1440, text: "<div class='node-content'><span class='step-label'>Decision: Disapprove</span><strong class='primary-action'>🚫 Manager Disapproves</strong><span class='instruction-text'>Manager provides mandatory written reason for disapproval. Argument returned to Auditor. ⏱️ Auditor's 24-hr SLA restarts for revision.</span></div>" },
+
+            // --- Role-Based Status Changes (post-gate) ---
+            { id: "t8",  x: 200,  y: 1660, text: "<div class='node-content'><span class='step-label'>If: QC Role</span><strong class='primary-action'>Status → Pending Auditor Revert</strong><span class='instruction-text'>QC flags a fault. ⏱️ Auditor is notified — 24-hr SLA starts to challenge or revert.</span></div>" },
+            { id: "t9",  x: 800,  y: 1660, text: "<div class='node-content'><span class='step-label'>If: Approved</span><strong class='primary-action'>Argument Forwarded to QC</strong><span class='instruction-text'>Manager-approved argument reaches QC. ⏱️ QC has 24hrs to accept, reject, or escalate.</span></div>" },
+            { id: "t10", x: 1400, y: 1660, text: "<div class='node-content'><span class='step-label'>If: QC_POC Role</span><strong class='primary-action'>Status → Escalated to Appellate Court</strong><span class='instruction-text'>Dispute escalated. ⏱️ Appellate authority is notified — 24-hr SLA to issue a final ruling.</span></div>" },
+
+            // --- Senior Review ---
+            { id: "t11", x: 800,  y: 1880, text: "<div class='node-content'><span class='step-label'>Step 6</span><strong class='primary-action'>Senior Reviews Argument</strong><span class='instruction-text'>Higher-role user (QC / Appellate / Ops) reviews within their 24-hr SLA window and selects an action.</span></div>" },
+
+            // --- SLA Policy Banner (floating reference) ---
+            { id: "tSLA", x: 1900, y: 600, text: "<div class='node-content'><span class='step-label'>📋 SLA Policy</span><strong class='primary-action'>Universal 24-Hr SLA Rule</strong><span class='instruction-text'>Every party — Auditor, Manager, QC, QC_POC, Appellate — has a strict <strong>24-hour window</strong> to respond upon receiving any notification, argument, counter-argument, approval, appeal, or escalation. This ensures the entire dispute is resolved on its true merit in a time-bound fashion.</span></div>" },
+
+            // --- Outcomes ---
+            { id: "t12", x: 300,  y: 2080, text: "<div class='node-content'><span class='step-label'>Outcome A</span><strong class='primary-action'>✅ Accepted</strong><span class='instruction-text'>Argument status → Accepted. Dispute status → Resolved. Case is closed.</span></div>" },
+            { id: "t13", x: 800,  y: 2080, text: "<div class='node-content'><span class='step-label'>Outcome B</span><strong class='primary-action'>❌ Rejected</strong><span class='instruction-text'>Argument status → Rejected. Dispute remains open. Auditor may revise and resubmit.</span></div>" },
+            { id: "t14", x: 1300, y: 2080, text: "<div class='node-content'><span class='step-label'>Outcome C</span><strong class='primary-action'>🚨 Escalated</strong><span class='instruction-text'>Argument status → Escalated. Dispute status → Escalated to Higher Authority.</span></div>" },
+
+            // --- Terminal States ---
+            { id: "t15", x: 300,  y: 2280, text: "<div class='node-content'><span class='step-label'>End State</span><strong class='primary-action'>Dispute: RESOLVED</strong><span class='instruction-text'>Final verdict reached. No further actions required on this dispute.</span></div>" },
+            { id: "t16", x: 1300, y: 2280, text: "<div class='node-content'><span class='step-label'>End State</span><strong class='primary-action'>Dispute: HIGHER AUTHORITY</strong><span class='instruction-text'>Case passed to executive-level for final binding decision outside the Tribunal system.</span></div>" }
+        ],
+        connections: [
+            // Entry chain
+            { from: "t1",  to: "t2",  id: "tc1"  },
+            { from: "t2",  to: "t3",  id: "tc2"  },
+            // Dashboard branches
+            { from: "t3",  to: "t4",  id: "tc3"  },
+            { from: "t3",  to: "t6",  id: "tc4"  },
+            // Create dispute branch
+            { from: "t4",  to: "t5",  id: "tc5"  },
+            { from: "t5",  to: "t7",  id: "tc6"  },
+            // Open dispute branch flows into Auditor argument
+            { from: "t6",  to: "t7",  id: "tc7"  },
+            // Auditor argument → Manager Gate
+            { from: "t7",  to: "t17", id: "tc20" },
+            // QC & QC_POC bypass the Manager gate
+            { from: "t7",  to: "t8",  id: "tc8"  },
+            { from: "t7",  to: "t10", id: "tc10" },
+            // Manager gate branches
+            { from: "t17", to: "t18", id: "tc21" },
+            { from: "t17", to: "t19", id: "tc22" },
+            // Approve → argument forwarded to QC
+            { from: "t18", to: "t9",  id: "tc23" },
+            // Disapprove → back to Auditor for revision
+            { from: "t19", to: "t7",  id: "tc24" },
+            // All approved paths converge on Senior Review
+            { from: "t8",  to: "t11", id: "tc11" },
+            { from: "t9",  to: "t11", id: "tc12" },
+            { from: "t10", to: "t11", id: "tc13" },
+            // Senior Review outcomes
+            { from: "t11", to: "t12", id: "tc14" },
+            { from: "t11", to: "t13", id: "tc15" },
+            { from: "t11", to: "t14", id: "tc16" },
+            // Terminal transitions
+            { from: "t12", to: "t15", id: "tc17" },
+            { from: "t13", to: "t7",  id: "tc18" },
+            { from: "t14", to: "t16", id: "tc19" }
+        ]
+    };
+
     const savedAuditor = localStorage.getItem('flowForge_auditor');
     if (savedAuditor) auditorData = JSON.parse(savedAuditor);
 
     const savedManager = localStorage.getItem('flowForge_manager');
     if (savedManager) managerData = JSON.parse(savedManager);
 
+    // Version-based auto-reset — clears stale cached layout whenever the data schema changes
+    const TRIBUNAL_VERSION = 'v3_sla';
+    if (localStorage.getItem('flowForge_tribunal_version') !== TRIBUNAL_VERSION) {
+        localStorage.removeItem('flowForge_tribunal');
+        localStorage.setItem('flowForge_tribunal_version', TRIBUNAL_VERSION);
+    }
+    const savedTribunal = localStorage.getItem('flowForge_tribunal');
+    if (savedTribunal) tribunalData = JSON.parse(savedTribunal);
+
     function saveData() {
-        if(activeTab === 'auditor') {
+        if (activeTab === 'auditor') {
             auditorData.nodes = structuredClone(nodes);
             auditorData.connections = structuredClone(connections);
             localStorage.setItem('flowForge_auditor', JSON.stringify(auditorData));
-        } else {
+        } else if (activeTab === 'manager') {
             managerData.nodes = structuredClone(nodes);
             managerData.connections = structuredClone(connections);
             localStorage.setItem('flowForge_manager', JSON.stringify(managerData));
+        } else if (activeTab === 'tribunal') {
+            tribunalData.nodes = structuredClone(nodes);
+            tribunalData.connections = structuredClone(connections);
+            localStorage.setItem('flowForge_tribunal', JSON.stringify(tribunalData));
         }
     }
 
@@ -105,7 +201,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function renderTab() {
         nodesContainer.innerHTML = '';
-        const data = activeTab === 'auditor' ? auditorData : managerData;
+        const data = activeTab === 'auditor' ? auditorData : (activeTab === 'manager' ? managerData : tribunalData);
         nodes = structuredClone(data.nodes);
         connections = structuredClone(data.connections);
         
@@ -288,13 +384,11 @@ document.addEventListener('DOMContentLoaded', () => {
         if (isConnecting && tempLine) {
             const containerRect = canvasContainer.getBoundingClientRect();
             const startNode = document.getElementById(connectionStartNodeId);
-            const startX = parseFloat(startNode.style.left) + startNode.offsetWidth / 2;
-            const startY = parseFloat(startNode.style.top) + startNode.offsetHeight / 2;
-            
             const endX = e.clientX - containerRect.left + canvasContainer.scrollLeft;
             const endY = e.clientY - containerRect.top + canvasContainer.scrollTop;
-            
-            tempLine.setAttribute("d", `M ${startX} ${startY} C ${startX} ${startY + (endY - startY) / 2}, ${endX} ${endY - (endY - startY) / 2}, ${endX} ${endY}`);
+            // start arrow from edge of source box, pointing toward cursor
+            const sp = getEdgeIntersection(startNode, endX, endY);
+            tempLine.setAttribute("d", `M ${sp.x} ${sp.y} C ${sp.x} ${sp.y + (endY - sp.y) / 2}, ${endX} ${endY - (endY - sp.y) / 2}, ${endX} ${endY}`);
         }
     });
 
@@ -322,20 +416,69 @@ document.addEventListener('DOMContentLoaded', () => {
         if(changed) saveData();
     });
 
+    /**
+     * Computes the point on the border of nodeEl's bounding rectangle
+     * that lies on the line from nodeEl's center toward (targetCX, targetCY).
+     */
+    function getEdgeIntersection(nodeEl, targetCX, targetCY) {
+        const nx  = parseFloat(nodeEl.style.left);
+        const ny  = parseFloat(nodeEl.style.top);
+        const nw  = nodeEl.offsetWidth;
+        const nh  = nodeEl.offsetHeight;
+        const cx  = nx + nw / 2;
+        const cy  = ny + nh / 2;
+        const dx  = targetCX - cx;
+        const dy  = targetCY - cy;
+
+        // If target is the same point, return center (degenerate case)
+        if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) return { x: cx, y: cy };
+
+        const hw = nw / 2;  // half-width
+        const hh = nh / 2;  // half-height
+
+        // Scale factor t: how far we travel along (dx,dy) before hitting an edge
+        const tx = Math.abs(dx) > 0.01 ? hw / Math.abs(dx) : Infinity;
+        const ty = Math.abs(dy) > 0.01 ? hh / Math.abs(dy) : Infinity;
+        const t  = Math.min(tx, ty);
+
+        return { x: cx + t * dx, y: cy + t * dy };
+    }
+
     function renderLines() {
-        let linesHtml = '<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#94a3b8" class="arrowhead" /></marker><marker id="arrow-hover" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#ef4444" class="arrowhead" /></marker></defs>';
+        // refX=8 places the arrowhead tip cleanly at the computed edge point
+        let linesHtml = '<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#94a3b8" class="arrowhead" /></marker><marker id="arrow-hover" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#ef4444" class="arrowhead" /></marker></defs>';
         
         connections.forEach(conn => {
             const startNode = document.getElementById(conn.from);
-            const endNode = document.getElementById(conn.to);
+            const endNode   = document.getElementById(conn.to);
             if (!startNode || !endNode) return;
-            
-            const startX = parseFloat(startNode.style.left) + startNode.offsetWidth / 2;
-            const startY = parseFloat(startNode.style.top) + startNode.offsetHeight / 2;
-            const endX = parseFloat(endNode.style.left) + endNode.offsetWidth / 2;
-            const endY = parseFloat(endNode.style.top) + endNode.offsetHeight / 2;
-            
-            const d = `M ${startX} ${startY} C ${startX} ${startY + (endY - startY) / 2}, ${endX} ${endY - (endY - startY) / 2}, ${endX} ${endY}`;
+
+            // Centers of each box
+            const sCx = parseFloat(startNode.style.left) + startNode.offsetWidth  / 2;
+            const sCy = parseFloat(startNode.style.top)  + startNode.offsetHeight / 2;
+            const eCx = parseFloat(endNode.style.left)   + endNode.offsetWidth    / 2;
+            const eCy = parseFloat(endNode.style.top)    + endNode.offsetHeight   / 2;
+
+            // Edge intersection points: arrow exits source box and enters target box
+            const sp = getEdgeIntersection(startNode, eCx, eCy);
+            const ep = getEdgeIntersection(endNode,   sCx, sCy);
+
+            // Direction-aligned Bezier: control points follow the center-to-center
+            // direction vector so the curve departs/arrives tangentially at each edge.
+            // This makes orient="auto" correctly align the arrowhead with the line angle.
+            const dx   = eCx - sCx;
+            const dy   = eCy - sCy;
+            const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+            const ux   = dx / dist;           // unit vector x
+            const uy   = dy / dist;           // unit vector y
+            const pull = Math.max(dist / 3, 60); // control-point arm length
+
+            const cp1x = sp.x + ux * pull;
+            const cp1y = sp.y + uy * pull;
+            const cp2x = ep.x - ux * pull;
+            const cp2y = ep.y - uy * pull;
+
+            const d = `M ${sp.x} ${sp.y} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${ep.x} ${ep.y}`;
             linesHtml += `<path class="connection" id="${conn.id}" d="${d}" marker-end="url(#arrow)"></path>`;
         });
         
